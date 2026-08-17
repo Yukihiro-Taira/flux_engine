@@ -15,13 +15,15 @@ use winit::{
 };
 
 use wgpu::util::DeviceExt;
+use navigation_gizmo::ViewDirection;
 
 mod texture;
 mod model;
 mod resources;
 mod editor_ui;
 mod egui_renderer;
-//mod grid;
+mod grid;
+mod navigation_gizmo;
 
 
 #[cfg(target_arch ="wasm32")]
@@ -121,6 +123,14 @@ pub enum CompareFunction{
 //----------------------------------------//
 
 //CAMERA
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionMode {
+    Perspective,
+    Orthographic,
+}
+
+#[derive(Clone)]
 struct Camera {
     eye: cgmath::Point3<f32>,
     target: cgmath::Point3<f32>,
@@ -129,14 +139,39 @@ struct Camera {
     fovy: f32,
     znear: f32,
     zfar: f32,
+    projection_mode: ProjectionMode,
+    ortho_scale: f32,
 }
 
 impl Camera {
     fn build_view_projection_matrix(&self) -> cgmath::Matrix4<f32> {
         let view = cgmath::Matrix4::look_at_rh(self.eye, self.target, self.up);
-        let proj = cgmath::perspective(cgmath::Deg(self.fovy), self.aspect, self.znear, self.zfar);
-    
-        return OPENGL_TO_WGPU_MATRIX * proj * view;
+        let projection = match self.projection_mode {
+            ProjectionMode::Perspective => {
+                    cgmath::perspective(
+                        cgmath::Deg(self.fovy),
+                        self.aspect,
+                        self.znear,
+                        self.zfar,
+                    )
+            }
+
+            ProjectionMode::Orthographic => {
+                let half_height = self.ortho_scale *0.5;
+
+                let half_width = half_height * self.aspect;
+
+                cgmath::ortho(
+                    -half_width,
+                    half_width,
+                    -half_height,
+                    half_height,
+                    self.znear,
+                    self.zfar,
+                )
+            }    
+        };
+        return OPENGL_TO_WGPU_MATRIX * projection * view
     }
 
 }
@@ -170,6 +205,7 @@ impl CameraUniform {
 //----------------------------------------//
 //Instace Buffer
 
+#[derive(Clone)]
 struct Instance {
     position: cgmath::Vector3<f32>,
     rotation_degrees: cgmath::Vector3<f32>,
@@ -257,6 +293,13 @@ pub struct State {
     instance_buffer_dirty: bool,
     background_color: wgpu::Color,
     texture_bind_group_layout: wgpu::BindGroupLayout,
+    
+    grid: grid::Grid,
+    initial_camera: Camera,
+    initial_instances: Vec<Instance>,
+    initial_editor: editor_ui::EditorUi,
+    
+    current_view: Option<ViewDirection>,
 }
 
 impl State{
@@ -264,11 +307,10 @@ impl State{
         let size = window.inner_size();
 
         const NUM_INSTANCES_PER_ROW: u32 =10;
-        const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(NUM_INSTANCES_PER_ROW as f32 * 0.5, 0.0, NUM_INSTANCES_PER_ROW as f32 * 0.5);
         
             let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
                 (0..NUM_INSTANCES_PER_ROW).map(move |x| {
-                    let position = cgmath::Vector3 { x: x as f32, y: 0.0, z: z as f32} - INSTANCE_DISPLACEMENT;
+                    let position = cgmath::Vector3 { x: x as f32, y: z as f32, z: 0.0,};
 
                     let rotation = if position.is_zero(){
                     cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0))
@@ -433,13 +475,16 @@ impl State{
         let camera_controller = CameraController::new(0.2);
 
         let camera = Camera { 
-            eye: (0.0, 1.0, 2.0).into(), 
+            eye: (8.0, -8.0, 6.0).into(), 
             target: (0.0, 0.0, 0.0).into(), 
-            up: cgmath::Vector3::unit_y(), 
+            up: cgmath::Vector3::unit_z(), 
             aspect: config.width as f32 / config.height as f32, 
             fovy: 45.0, 
             znear: 0.1, 
-            zfar: 100.0, 
+            zfar: 100.0,
+
+            projection_mode: ProjectionMode::Perspective,
+            ortho_scale: 10.0, 
         };
 
         let mut camera_uniform = CameraUniform::new();
@@ -556,6 +601,21 @@ impl State{
         )
         .await?;
 
+//----------------------------------------//
+
+        let grid= grid::Grid::new(
+            &device,
+            config.format,
+            &camera_bind_group_layout,
+            editor.grid_size,
+            editor.grid_spacing,
+            editor.grid_color,
+        );
+
+//----------------------------------------//
+        let initial_camera = camera.clone();
+        let initial_instances = instances.clone();
+        let initial_editor = editor.clone();
 
         Ok(Self {
             surface,
@@ -582,6 +642,12 @@ impl State{
             instance_buffer_dirty: false,
             background_color,
             texture_bind_group_layout,
+            grid,
+            initial_camera,
+            initial_instances,
+            initial_editor,
+
+            current_view: None,
         })
     }
 
@@ -592,9 +658,15 @@ impl State{
         if width > 0 && height > 0 {
             self.config.width = width;
             self.config.height = height;
+
+            self.camera.aspect = width as f32 / height as f32;
+
             self.surface.configure(&self.device, &self.config);
             self.is_surface_configured = true;
             self.depth_texture = texture::Texture::create_depth_texture(&self.device, &self.config, "depth_texture");
+
+            self.is_surface_configured = true;
+            self.window.request_redraw();
         }
 
     }
@@ -623,35 +695,15 @@ impl State{
     }
 
     fn reset_all(&mut self) {
-        const INSTANCES_PER_ROW: u32 = 10;
+        let editor_window_offset = self.editor.editor_window_offset;
 
-        let displacement = cgmath::Vector3::new(
-            INSTANCES_PER_ROW as f32 *0.5,
-            0.0,
-            INSTANCES_PER_ROW as f32 * 0.5,
-        );
+        self.instances.clone_from(&self.initial_instances);
+        self.editor.clone_from(&self.initial_editor);
+        self.editor.editor_window_offset = editor_window_offset;
+        self.camera.clone_from(&self.initial_camera);
 
-        // Restore every instance to its original grid position.
-        for (index, instance) in self.instances.iter_mut().enumerate() {
-            let index = index as u32;
-            let x = index % INSTANCES_PER_ROW;
-            let z = index / INSTANCES_PER_ROW;
-
-            instance.position = cgmath::Vector3::new(
-                x as f32,
-                0.0,
-                z as f32,
-            ) - displacement;
-
-            instance.rotation_degrees = 
-                cgmath::Vector3::new(0.0, 45.0, 0.0);
-            instance.scale = 
-                cgmath::Vector3::new(0.01, 0.01, 0.01);
-        }
-
-        // Restore all editor values, including background, grid, texture toggle, selected instance, status, and pending files.
-
-        self.editor = editor_ui::EditorUi::default();
+        // Keep the projection correct if the window was resized after startup.
+        self.camera.aspect = self.config.width as f32 / self.config.height as f32;
 
         self.background_color = wgpu::Color {
             r: self.editor.background[0] as f64,
@@ -660,32 +712,187 @@ impl State{
             a: self.editor.background[3] as f64,
         };
 
-        // Restore the camera while retaining the current window aspect ratio
-        self.camera.eye = (0.0, 1.0, 2.0).into();
-        self.camera.target = (0.0, 0.0, 0.0).into();
-        self.camera.up = cgmath::Vector3::unit_y();
-        self.camera.fovy = 45.0;
-        self.camera.znear = 0.1;
-        self.camera.zfar = 100.0;
-        self.camera.aspect = self.config.width as f32 / self.config.height as f32;
+        self.grid.rebuild(
+            &self.device,
+            self.editor.grid_size,
+            self.editor.grid_spacing,
+            self.editor.grid_color,
+        );
 
-        // Release any currently held movement keys
         self.camera_controller = CameraController::new(0.2);
 
-        // Upload restored instance transforms during the next update
         self.instance_buffer_dirty = true;
         self.window.request_redraw();
     }
 
-    fn build_editor_ui(&mut self, ui: &mut egui::Ui) {
-        egui::Panel::right("properties")
-        .default_size(329.0)
-        .resizable(true)
-        .show(ui, |ui| {
-            ui.heading("Viewport Editor");
-            if ui.button("Reset All").clicked() {
-                self.reset_all();
+    fn snap_camera_to_view( &mut self, view: ViewDirection,) {
+        let distance = (self.camera.eye - self.camera.target)
+            .magnitude()
+            .max(0.01);
+
+        let direction = match view {
+            ViewDirection::Right => {
+                cgmath::Vector3::new(1.0,0.0, 0.0)
             }
+
+            ViewDirection::Left => {
+                cgmath::Vector3::new(-1.0,0.0, 0.0)
+            }
+
+            ViewDirection::Back => {
+                cgmath::Vector3::new(0.0,1.0, 0.0)
+            }
+
+            ViewDirection::Front => {
+                cgmath::Vector3::new(0.0,-1.0, 0.0)
+            }
+
+            ViewDirection::Top => {
+                cgmath::Vector3::new(0.0,0.0, 1.0)
+            }
+
+            ViewDirection::Bottom => {
+                cgmath::Vector3::new(0.0,0.0, -1.0)
+            }
+        };
+
+        self.camera.eye = self.camera.target + direction * distance;
+
+        self.camera.up = match view {
+            ViewDirection::Right
+            | ViewDirection::Left
+            | ViewDirection::Back
+            | ViewDirection::Front => {
+                cgmath::Vector3::unit_z()
+            }
+
+            ViewDirection::Top => {
+                cgmath::Vector3::unit_y()
+            }
+
+            ViewDirection::Bottom => {
+                -cgmath::Vector3::unit_y()
+            }
+        };
+
+        self.camera.projection_mode = ProjectionMode::Orthographic;
+
+        self.current_view = Some(view);
+
+        // Clear held camera movement keys
+        self.camera_controller = CameraController::new(0.2);
+
+        self.window.request_redraw();
+    }
+
+    fn current_view_name(&self) -> &'static str {
+        match self.current_view {
+            Some(ViewDirection::Right) => {"Right Orthographic"}
+            Some(ViewDirection::Left) => {"Left Orthographic"}
+            Some(ViewDirection::Back) => {"Back Orthographic"}
+            Some(ViewDirection::Front) => {"Front Orthographic"}
+            Some(ViewDirection::Top) => {"Top Orthographic"}
+            Some(ViewDirection::Bottom) => {"Bottom Orthographic"}
+            None => match self.camera.projection_mode {
+                ProjectionMode::Perspective => {"User Perspective"} 
+                ProjectionMode::Orthographic => {"User Orthographic"}
+            },
+        }
+    }
+
+    fn camera_information_ui(
+        &self,
+        context: &egui::Context,
+    ) {
+        egui::Area::new(
+            egui::Id::new("camera_information"),
+        )
+        .anchor(
+            egui::Align2::LEFT_TOP,
+            egui::vec2(12.0, 12.0),
+        )
+        .show(context, |ui| {
+            egui::Frame::new()
+                .fill(
+                    egui::Color32::from_black_alpha(160),
+                )
+                .corner_radius(5.0)
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.label(self.current_view_name());
+
+                    ui.label(format!(
+                        "Eye: {:.2}, {:.2}, {:.2}",
+                        self.camera.eye.x,
+                        self.camera.eye.y,
+                        self.camera.eye.z,
+                    ));
+
+                    ui.label(format!(
+                        "Target: {:.2}, {:.2}, {:.2}",
+                        self.camera.target.x,
+                        self.camera.target.y,
+                        self.camera.target.z,
+                    ));
+
+                    let distance = (self.camera.eye - self.camera.target ).magnitude();
+
+                    ui.label(format!(
+                        "Distance: {:.2}",
+                        distance,
+                    ));
+                });
+        });
+    }
+
+    //--------------------------------------------------------------------//
+    // UI STUFF//
+    fn build_editor_ui(&mut self, ui: &mut egui::Ui) {
+        let editor_window_offset = self.editor.editor_window_offset;
+        let mut editor_drag_delta = egui::Vec2::ZERO;
+
+        egui::Window::new("Viewport Editor")
+        .id(egui::Id::new("viewport_editor_window",))
+        // Anchored egui windows are positioned from the current viewport on
+        // every frame, so this reliably follows the upper-right corner when
+        // the native window changes size.
+        .anchor(
+            egui::Align2::RIGHT_TOP,
+            egui::vec2(editor_window_offset[0], editor_window_offset[1]),
+        )
+        .default_size(egui::vec2(240.0, 650.0))
+        .min_width(240.0)
+        .resizable(true)
+        .collapsible(true)
+        .constrain(true)
+        .vscroll(true)
+        .show(ui, |ui| {
+            let (drag_rect, drag_response) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), 26.0),
+                egui::Sense::drag(),
+            );
+
+            let drag_color = if drag_response.dragged() || drag_response.hovered() {
+                ui.visuals().widgets.hovered.fg_stroke.color
+            } else {
+                ui.visuals().weak_text_color()
+            };
+
+            ui.painter().text(
+                drag_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "☰ Drag window",
+                egui::FontId::proportional(13.0),
+                drag_color,
+            );
+
+            if drag_response.dragged() {
+                editor_drag_delta = ui.ctx().input(|input| input.pointer.delta());
+            }
+
+            ui.separator();
+
+            if ui.button("Reset All").clicked() { self.reset_all();}
 
             ui.separator();
             self.asset_drop_ui(ui);
@@ -698,6 +905,26 @@ impl State{
             ui.separator();
             ui.label(format!("Status: {}", self.editor.status));
         });
+
+        if editor_drag_delta != egui::Vec2::ZERO {
+            self.editor.editor_window_offset[0] += editor_drag_delta.x;
+            self.editor.editor_window_offset[1] += editor_drag_delta.y;
+        }
+
+        let context = ui.ctx().clone();
+
+        let clicked_view = navigation_gizmo::show(
+            &context,
+            self.camera.eye,
+            self.camera.target,
+            self.camera.up,
+        );
+
+        if let Some(view) = clicked_view {
+            self.snap_camera_to_view(view);
+        }
+
+        self.camera_information_ui(&context);
     }
 
     fn slider_with_number (
@@ -761,16 +988,54 @@ impl State{
 
     fn transform_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Transform");
-        if self.instances.is_empty() { ui.label("No instance"); return; }
-        self.editor.selected_instance = self.editor.selected_instance
-            .min(self.instances.len() -1);
-        ui.add(egui::Slider::new(
-            &mut self.editor.selected_instance,
-            0..=self.instances.len() -1,
-        ).text("Instance"));
+
+        if self.instances.is_empty() {
+            ui.label("No instances");
+            return;
+        }
+
+        self.editor.visible_instance_count = self.editor.visible_instance_count.clamp(1, self.instances.len());
+        
+        let amount_response = ui.add(
+            egui::Slider::new(
+                &mut self.editor.visible_instance_count, 1..=self.instances.len(),
+            )
+            .text("Number of Instances")
+            .show_value(true),
+        );
+
+        if amount_response.changed() {
+            self.editor.status = format!( "{} of instances", self.editor.visible_instance_count,);
+        }
+        
+        let last_instance = self.editor.visible_instance_count -1;
+
+        self.editor.selected_instance = self.editor.selected_instance.min(last_instance);
+
+        let instance_response = ui.add(
+            egui::Slider::new(
+                &mut self.editor.selected_instance,
+                0..=last_instance,
+            )
+            .text("Instance")
+            .show_value(true),
+        );
+
+        if instance_response.changed() {
+            self.editor.status = format!(
+                "Selected instance {}", self.editor.selected_instance,
+            );
+        }
+
+        ui.label(format!(
+            "Editing instance {} of {}",self.editor.selected_instance + 1, self.editor.visible_instance_count,
+        ));
 
         let item = &mut self.instances[self.editor.selected_instance];
+
         let mut changed = false;
+
+        // UI--transform interface controls
         ui.label("Translation");
         changed |= Self::slider_with_number(ui, "X", &mut item.position.x, -50.0..=50.0, 0.05);
         changed |= Self::slider_with_number(ui, "Y", &mut item.position.y, -50.0..=50.0, 0.05);
@@ -832,8 +1097,41 @@ impl State{
             };
         }
         ui.checkbox(&mut self.editor.show_grid, "Show grid");
-        Self::slider_with_number(ui, "Grid size", &mut self.editor.grid_size, 1.0..=100.0, 0.5);
-        Self::slider_with_number(ui, "Grid spacing", &mut self.editor.grid_spacing, 0.1..=10.0, 0.1);
+
+        let color_changed = ui.horizontal(|ui| {
+            ui.label("Grid color");
+
+            ui.color_edit_button_rgba_unmultiplied(
+                &mut self.editor.grid_color,
+            )
+            .changed()
+        })
+        .inner;
+
+        let size_changed = Self::slider_with_number(
+            ui,
+            "Grid size",
+            &mut self.editor.grid_size,
+            0.1..=100.0,
+            0.5,
+        );
+
+        let spacing_changed = Self::slider_with_number(
+            ui,
+            "Grid spacing",
+            &mut self.editor.grid_spacing,
+            0.1..=10.0,
+            0.1,
+        );
+
+        if color_changed || size_changed || spacing_changed {
+            self.grid.rebuild(
+                &self.device,
+                self.editor.grid_size,
+                self.editor.grid_spacing,
+                self.editor.grid_color,
+            );
+        }
     }
 
     fn render(&mut self) -> anyhow::Result<()>{
@@ -917,13 +1215,22 @@ impl State{
             timestamp_writes: None,
             multiview_mask: None,
         });
+        if self.editor.show_grid {
+            self.grid.draw(
+                &mut render_pass,
+                &self.camera_bind_group,
+            );
+        }
+        // Switch from the grid pipeline back to the model pipeline.
         render_pass.set_pipeline(&self.render_pipeline);
         render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
         render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
 
         render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+
         use model::DrawModel;
-        render_pass.draw_mesh_instanced(&self.obj_model.meshes[0], 0..self.instances.len() as u32);
+        
+        render_pass.draw_mesh_instanced(&self.obj_model.meshes[0], 0..self.editor.visible_instance_count as u32);
     }
     let extra = self.egui.renderer.update_buffers(
         &self.device,
@@ -972,7 +1279,12 @@ impl State{
         if code == KeyCode::Escape && is_pressed {
             event_loop.exit();
         } else {
-            self.camera_controller.handle_key(code, is_pressed);
+            let handled = self.camera_controller.handle_key(code, is_pressed);
+
+            if handled && is_pressed {
+                self.current_view = None;
+                self.camera.projection_mode = ProjectionMode::Perspective;
+            }
         }
     }
 
