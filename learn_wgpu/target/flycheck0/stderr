@@ -1,13 +1,127 @@
-   0.139992583s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint: stale: missing "/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/res/*"
-   0.140385292s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint: fingerprint dirty for learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("learn_wgpu", ["cdylib", "rlib"], "/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/src/lib.rs", Edition2024) }
-   0.140398292s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { unit: UnitIndex(99) })
-   0.148390500s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="build-script-build"}: cargo::core::compiler::fingerprint: fingerprint dirty for learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu)/RunCustomBuild/TargetInner { ..: custom_build_target("build-script-build", "/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/build.rs", Edition2024) }
-   0.148400000s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="build-script-build"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(MissingFile { path: "/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/res/*" }))
-   0.148957250s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint: fingerprint dirty for learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("learn_wgpu", ["cdylib", "rlib"], "/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/src/lib.rs", Edition2024) }
-   0.148962208s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { unit: UnitIndex(99) })
-   0.149541375s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint: fingerprint dirty for learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu)/Check { test: false }/TargetInner { name: "learn_wgpu", doc: true, ..: with_path("/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/src/main.rs", Edition2024) }
-   0.149545042s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { unit: UnitIndex(94) })
-   0.150014333s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint: fingerprint dirty for learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu)/Check { test: true }/TargetInner { name: "learn_wgpu", doc: true, ..: with_path("/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/src/main.rs", Edition2024) }
-   0.150017667s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { unit: UnitIndex(94) })
+   0.109831958s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint: stale: missing "/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/res/*"
+   0.110682208s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint: fingerprint error for learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("learn_wgpu", ["cdylib", "rlib"], "/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/src/lib.rs", Edition2024) }
+   0.110696375s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/target/debug/.fingerprint/learn_wgpu-0dc9a94c265fa9ed/lib-learn_wgpu`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: <std::backtrace::Backtrace>::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   7: cargo::ops::cargo_compile::compile_ws
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
+   0.123645708s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="build-script-build"}: cargo::core::compiler::fingerprint: fingerprint dirty for learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu)/RunCustomBuild/TargetInner { ..: custom_build_target("build-script-build", "/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/build.rs", Edition2024) }
+   0.123657041s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="build-script-build"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(MissingFile { path: "/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/res/*" }))
+   0.124718416s  INFO prepare_target{force=false package_id=ufbx v0.11.3 target="ufbx"}: cargo::core::compiler::fingerprint: fingerprint error for ufbx v0.11.3/Check { test: false }/TargetInner { ..: lib_target("ufbx", ["lib"], "/Users/m4max-mbp/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ufbx-0.11.3/src/lib.rs", Edition2018) }
+   0.124727625s  INFO prepare_target{force=false package_id=ufbx v0.11.3 target="ufbx"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/target/debug/.fingerprint/ufbx-512a389d0f231e11/lib-ufbx`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: <std::backtrace::Backtrace>::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: cargo::core::compiler::compile
+   7: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   8: cargo::ops::cargo_compile::compile_ws
+   9: cargo::ops::cargo_compile::compile_with_exec
+  10: cargo::ops::cargo_compile::compile
+  11: cargo::commands::check::exec
+  12: <cargo::cli::Exec>::exec
+  13: cargo::main
+  14: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  15: std::rt::lang_start::<()>::{closure#0}
+  16: std::rt::lang_start_internal
+  17: _main
+   0.125125500s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint: fingerprint error for learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("learn_wgpu", ["cdylib", "rlib"], "/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/src/lib.rs", Edition2024) }
+   0.125132833s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/target/debug/.fingerprint/learn_wgpu-386f5492e1c3519f/test-lib-learn_wgpu`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: <std::backtrace::Backtrace>::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   7: cargo::ops::cargo_compile::compile_ws
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
+   0.125820291s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint: fingerprint error for learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu)/Check { test: false }/TargetInner { name: "learn_wgpu", doc: true, ..: with_path("/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/src/main.rs", Edition2024) }
+   0.125825875s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/target/debug/.fingerprint/learn_wgpu-6f47b2f1bc0672d0/bin-learn_wgpu`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: <std::backtrace::Backtrace>::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   7: cargo::ops::cargo_compile::compile_ws
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
+   0.126443208s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint: fingerprint error for learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu)/Check { test: true }/TargetInner { name: "learn_wgpu", doc: true, ..: with_path("/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/src/main.rs", Edition2024) }
+   0.126447833s  INFO prepare_target{force=false package_id=learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu) target="learn_wgpu"}: cargo::core::compiler::fingerprint:     err: failed to read `/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu/target/debug/.fingerprint/learn_wgpu-d9dfa8e52a8a2d7d/test-bin-learn_wgpu`
+
+Caused by:
+    No such file or directory (os error 2)
+
+Stack backtrace:
+   0: <std::backtrace::Backtrace>::create
+   1: cargo_util::paths::read_bytes
+   2: cargo_util::paths::read
+   3: cargo::core::compiler::fingerprint::_compare_old_fingerprint
+   4: cargo::core::compiler::fingerprint::prepare_target
+   5: cargo::core::compiler::compile
+   6: <cargo::core::compiler::build_runner::BuildRunner>::compile
+   7: cargo::ops::cargo_compile::compile_ws
+   8: cargo::ops::cargo_compile::compile_with_exec
+   9: cargo::ops::cargo_compile::compile
+  10: cargo::commands::check::exec
+  11: <cargo::cli::Exec>::exec
+  12: cargo::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace::<fn(), ()>
+  14: std::rt::lang_start::<()>::{closure#0}
+  15: std::rt::lang_start_internal
+  16: _main
    Compiling learn_wgpu v0.1.0 (/Users/m4max-mbp/Documents/Documents - Yukihiro’s MacBook Pro/Coding/rust/wgpu/learn_wgpu/learn_wgpu)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.41s
+    Checking ufbx v0.11.3
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.08s

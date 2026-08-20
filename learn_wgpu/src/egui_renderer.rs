@@ -17,13 +17,14 @@ impl EguiRenderer {
             window,
             Some(window.scale_factor() as f32),
             window.theme(),
-            None,        
+            None,
         );
-        let renderer = egui_wgpu::Renderer::new(
-            device,
-            format,
-            egui_wgpu::RendererOptions::default(),
-        );
-        Self { context, state, renderer }
+        let renderer =
+            egui_wgpu::Renderer::new(device, format, egui_wgpu::RendererOptions::default());
+        Self {
+            context,
+            state,
+            renderer,
+        }
     }
 }

@@ -8,20 +8,18 @@ struct GridVertex {
 }
 
 impl GridVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![
-            0 => Float32x3,
-            1 => Float32x4
-        ];
+    const ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![
+        0 => Float32x3,
+        1 => Float32x4
+    ];
 
-        fn desc() -> wgpu::VertexBufferLayout<'static> {
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<GridVertex>()
-                    as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &Self::ATTRIBUTES,
-            }
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<GridVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &Self::ATTRIBUTES,
         }
+    }
 }
 
 pub struct Grid {
@@ -39,95 +37,65 @@ impl Grid {
         spacing: f32,
         color: [f32; 4],
     ) -> Self {
-        let shader =
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("Grid Shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("grid.wgsl").into(),
-                ),
-            });
-            
-        let pipeline_layout =
-            device.create_pipeline_layout(
-                &wgpu::PipelineLayoutDescriptor {
-                    label: Some("Grid Pipline Layout"),
-                    bind_group_layouts: &[Some(camera_layout)],
-                    immediate_size: 0,
-                },
-            );
-        let pipeline =
-            device.create_render_pipeline(
-                &wgpu::RenderPipelineDescriptor {
-                    label: Some("Grid Pipeline"),
-                    layout: Some(&pipeline_layout),
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Grid Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("grid.wgsl").into()),
+        });
 
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some("vs_main"),
-                        buffers: &[GridVertex::desc()],
-                        compilation_options:
-                            wgpu::PipelineCompilationOptions::default(),
-                    },
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Grid Pipline Layout"),
+            bind_group_layouts: &[Some(camera_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Grid Pipeline"),
+            layout: Some(&pipeline_layout),
 
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some("fs_main"),
-                        targets: &[Some(
-                            wgpu::ColorTargetState {
-                                format: surface_format,
-                                blend: Some(
-                                    wgpu::BlendState::ALPHA_BLENDING,
-                                ),
-                                write_mask: wgpu::ColorWrites::ALL,
-                            },
-                        )],
-                        compilation_options:
-                            wgpu::PipelineCompilationOptions::default(),
-                    }),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[GridVertex::desc()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
 
-                    primitive: wgpu::PrimitiveState {
-                        topology:
-                            wgpu::PrimitiveTopology::LineList,
-                            ..Default::default()
-                    },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
 
-                    depth_stencil: Some(
-                        wgpu::DepthStencilState {
-                            format:
-                                crate::texture::Texture::DEPTH_FORMAT,
-                            
-                            // The grid should not block models
-                            // rendered after it.
-                            depth_write_enabled: Some(false),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                ..Default::default()
+            },
 
-                            depth_compare: Some(
-                                wgpu::CompareFunction::LessEqual,
-                            ),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: crate::texture::Texture::DEPTH_FORMAT,
 
-                            stencil:
-                                wgpu::StencilState::default(),
+                // The grid should not block models
+                // rendered after it.
+                depth_write_enabled: Some(false),
 
-                            bias:
-                                wgpu::DepthBiasState::default(),
-                        },
-                    ),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
 
-                    multisample:
-                        wgpu::MultisampleState::default(),
+                stencil: wgpu::StencilState::default(),
 
-                    multiview_mask: None,
-                    cache: None,
-                },
-            );
-        
-        let (vertex_buffer, vertex_count) =
-            Self::create_vertices(
-                device,
-                size,
-                spacing,
-                color,
-            );
-        
+                bias: wgpu::DepthBiasState::default(),
+            }),
+
+            multisample: wgpu::MultisampleState::default(),
+
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let (vertex_buffer, vertex_count) = Self::create_vertices(device, size, spacing, color);
+
         Self {
             pipeline,
             vertex_buffer,
@@ -135,20 +103,8 @@ impl Grid {
         }
     }
 
-    pub fn rebuild(
-        &mut self,
-        device: &wgpu::Device,
-        size: f32,
-        spacing: f32,
-        color: [f32; 4],
-        ) {
-        let (vertex_buffer, vertex_count) =
-            Self::create_vertices(
-                device,
-                size,
-                spacing,
-                color,
-            );
+    pub fn rebuild(&mut self, device: &wgpu::Device, size: f32, spacing: f32, color: [f32; 4]) {
+        let (vertex_buffer, vertex_count) = Self::create_vertices(device, size, spacing, color);
         self.vertex_buffer = vertex_buffer;
         self.vertex_count = vertex_count;
     }
@@ -167,41 +123,72 @@ impl Grid {
 
         for line in -line_count..=line_count {
             let offset = line as f32 * spacing;
+            let mut line_color = if line == 0 {
+                [1.0, 0.45, 0.45, 0.15]
+            } else {
+                color
+            };
+            // Keep every grid line, including the emphasized origin axes,
+            // at exactly 15% opacity.
+            line_color[3] = 0.15;
 
             // Line parallel to the X axis.
             vertices.push(GridVertex {
                 position: [-size, offset, 0.0],
-                color,
+                color: line_color,
             });
 
             vertices.push(GridVertex {
                 position: [size, offset, 0.0],
-                color,
+                color: line_color,
             });
 
             // Line parallel to the Z axis
             vertices.push(GridVertex {
                 position: [offset, -size, 0.0],
-                color,
+                color: line_color,
             });
 
             vertices.push(GridVertex {
                 position: [offset, size, 0.0],
-                color,
+                color: line_color,
             });
+
+            // WebGPU line primitives have a fixed one-pixel width. Draw two
+            // close parallel companions to make the world axes visibly thicker.
+            if line == 0 {
+                let thickness = spacing * 0.035;
+                for side in [-thickness, thickness] {
+                    vertices.extend_from_slice(&[
+                        GridVertex {
+                            position: [-size, side, 0.0],
+                            color: line_color,
+                        },
+                        GridVertex {
+                            position: [size, side, 0.0],
+                            color: line_color,
+                        },
+                        GridVertex {
+                            position: [side, -size, 0.0],
+                            color: line_color,
+                        },
+                        GridVertex {
+                            position: [side, size, 0.0],
+                            color: line_color,
+                        },
+                    ]);
+                }
+            }
         }
 
         let vertex_count = vertices.len() as u32;
 
-        let vertex_buffer =
-            device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("Grid Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                },
-            );
-        
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Grid Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
         (vertex_buffer, vertex_count)
     }
 
@@ -212,20 +199,10 @@ impl Grid {
     ) {
         render_pass.set_pipeline(&self.pipeline);
 
-        render_pass.set_bind_group(
-            0,
-            camera_bind_group,
-            &[],
-        );
+        render_pass.set_bind_group(0, camera_bind_group, &[]);
 
-        render_pass.set_vertex_buffer(
-            0,
-            self.vertex_buffer.slice(..),
-        );
+        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
 
-        render_pass.draw(
-            0..self.vertex_count,
-            0..1,
-        );
+        render_pass.draw(0..self.vertex_count, 0..1);
     }
 }
