@@ -1,11 +1,14 @@
 use std::ops::Range;
+use wgpu::util::DeviceExt;
 
 pub trait Vertex {
     fn desc() -> wgpu::VertexBufferLayout<'static>;
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(
+    Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize,
+)]
 pub struct ModelVertex {
     pub position: [f32; 3],
     pub tex_coords: [f32; 2],
@@ -14,14 +17,18 @@ pub struct ModelVertex {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(
+    Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize,
+)]
 pub struct PointMarkerVertex {
     pub center: [f32; 3],
     pub corner: [f32; 2],
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(
+    Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable, serde::Serialize, serde::Deserialize,
+)]
 pub struct NormalMarkerVertex {
     pub origin: [f32; 3],
     pub normal: [f32; 3],
@@ -99,7 +106,7 @@ pub struct Model {
     pub materials: Vec<MaterialSource>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MaterialSource {
     pub name: String,
     pub diffuse: [f32; 3],
@@ -114,15 +121,17 @@ pub struct Mesh {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub num_elements: u32,
-    pub point_marker_buffer: wgpu::Buffer,
+    pub point_marker_buffer: Option<wgpu::Buffer>,
     pub point_marker_count: u32,
-    pub vertex_normal_buffer: wgpu::Buffer,
+    pub vertex_normal_buffer: Option<wgpu::Buffer>,
     pub vertex_normal_count: u32,
-    pub point_normal_buffer: wgpu::Buffer,
+    pub point_normal_buffer: Option<wgpu::Buffer>,
     pub point_normal_count: u32,
-    pub face_normal_buffer: wgpu::Buffer,
+    pub face_normal_buffer: Option<wgpu::Buffer>,
     pub face_normal_count: u32,
     pub uv_edges: Vec<([f32; 2], [f32; 2])>,
+    pub source_vertices: Vec<ModelVertex>,
+    pub source_indices: Vec<u32>,
     pub uv_tile: (i32, i32),
     pub bounds_min: [f32; 3],
     pub bounds_max: [f32; 3],
@@ -131,7 +140,89 @@ pub struct Mesh {
     pub material: usize,
 }
 
-#[derive(Debug, Clone, Default)]
+impl Mesh {
+    pub fn ensure_point_markers_uploaded(&mut self, device: &wgpu::Device) {
+        if self.point_marker_buffer.is_none() {
+            let corners = [
+                [-1.0, -1.0],
+                [1.0, -1.0],
+                [1.0, 1.0],
+                [-1.0, -1.0],
+                [1.0, 1.0],
+                [-1.0, 1.0],
+            ];
+            let markers = self
+                .source_vertices
+                .iter()
+                .flat_map(|vertex| {
+                    corners.map(|corner| PointMarkerVertex {
+                        center: vertex.position,
+                        corner,
+                    })
+                })
+                .collect::<Vec<_>>();
+            self.point_marker_count = markers.len() as u32;
+            self.point_marker_buffer = Some(device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("Point marker buffer"),
+                    contents: bytemuck::cast_slice(&markers),
+                    usage: wgpu::BufferUsages::VERTEX,
+                },
+            ));
+        }
+    }
+
+    pub fn ensure_normal_markers_uploaded(&mut self, device: &wgpu::Device) {
+        if self.vertex_normal_buffer.is_some()
+            && self.point_normal_buffer.is_some()
+            && self.face_normal_buffer.is_some()
+        {
+            return;
+        }
+        let (vertex_normals, point_normals, face_normals) =
+            crate::resources::normal_markers(&self.source_vertices, &self.source_indices);
+        let create = |label, markers: &[NormalMarkerVertex]| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytemuck::cast_slice(markers),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        };
+        if self.vertex_normal_buffer.is_none() {
+            self.vertex_normal_count = vertex_normals.len() as u32;
+            self.vertex_normal_buffer =
+                Some(create("Vertex normal marker buffer", &vertex_normals));
+        }
+        if self.point_normal_buffer.is_none() {
+            self.point_normal_count = point_normals.len() as u32;
+            self.point_normal_buffer = Some(create("Point normal marker buffer", &point_normals));
+        }
+        if self.face_normal_buffer.is_none() {
+            self.face_normal_count = face_normals.len() as u32;
+            self.face_normal_buffer = Some(create("Face normal marker buffer", &face_normals));
+        }
+    }
+
+    pub fn ensure_uv_edges(&mut self) {
+        if !self.uv_edges.is_empty() || self.source_indices.is_empty() {
+            return;
+        }
+        self.uv_edges = self
+            .source_indices
+            .chunks_exact(3)
+            .flat_map(|triangle| {
+                let uv = [
+                    self.source_vertices[triangle[0] as usize].tex_coords,
+                    self.source_vertices[triangle[1] as usize].tex_coords,
+                    self.source_vertices[triangle[2] as usize].tex_coords,
+                ];
+                [(uv[0], uv[1]), (uv[1], uv[2]), (uv[2], uv[0])]
+            })
+            .collect();
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct GeometryStats {
     /// Welded position count (UV and normal seam duplicates count once).
     pub point_count: usize,

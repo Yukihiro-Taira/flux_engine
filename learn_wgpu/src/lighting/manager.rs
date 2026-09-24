@@ -1,5 +1,6 @@
 use super::{LightId, LightKind, SceneLight, ViewportLightingMode};
 
+#[derive(Clone, PartialEq)]
 pub struct LightingManager {
     pub mode: ViewportLightingMode,
     pub lights: Vec<SceneLight>,
@@ -79,6 +80,29 @@ impl LightingManager {
 
     pub fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);
+    }
+
+    pub fn restore_project(
+        &mut self,
+        mode: ViewportLightingMode,
+        lights: Vec<SceneLight>,
+        selected_light: Option<LightId>,
+        area_samples: u32,
+        environment_samples: u32,
+    ) {
+        self.next_id = lights
+            .iter()
+            .map(|light| light.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.mode = mode;
+        self.lights = lights;
+        self.selected_light =
+            selected_light.filter(|selected| self.lights.iter().any(|light| light.id == *selected));
+        self.area_samples = area_samples;
+        self.environment_samples = environment_samples;
+        self.touch();
     }
 }
 

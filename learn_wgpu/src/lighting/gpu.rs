@@ -1,7 +1,7 @@
 use cgmath::{Deg, InnerSpace, Matrix3, Vector3};
 use wgpu::util::DeviceExt;
 
-use super::{LightingManager, SceneLight};
+use super::{LightingManager, SceneLight, shadow::ShadowRenderer};
 
 pub const MAX_GPU_LIGHTS: usize = 64;
 
@@ -34,7 +34,7 @@ pub struct LightingGpu {
 }
 
 impl LightingGpu {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, shadows: &ShadowRenderer) -> Self {
         let uniform = LightingUniform {
             counts: [0, 0, 16, 64],
             default_settings: [0.08, 1.0, 1.0, 0.0],
@@ -66,6 +66,32 @@ impl LightingGpu {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
@@ -89,6 +115,18 @@ impl LightingGpu {
                     binding: 1,
                     resource: light_buffer.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&shadows.texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&shadows.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: shadows.matrix_buffer.as_entire_binding(),
+                },
             ],
         });
         Self {
@@ -99,11 +137,17 @@ impl LightingGpu {
         }
     }
 
-    pub fn upload(&self, queue: &wgpu::Queue, manager: &LightingManager, _camera: &crate::Camera) {
+    pub fn upload(
+        &self,
+        queue: &wgpu::Queue,
+        manager: &LightingManager,
+        _camera: &crate::Camera,
+        shadows: &ShadowRenderer,
+    ) {
         let active = manager
             .active_direct_lights()
             .take(manager.max_lights.min(MAX_GPU_LIGHTS))
-            .map(GpuLight::from_scene)
+            .map(|light| GpuLight::from_scene(light, shadows.assignment(light.id)))
             .collect::<Vec<_>>();
         if !active.is_empty() {
             queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&active));
@@ -143,7 +187,7 @@ impl GpuLight {
         }
     }
 
-    fn from_scene(light: &SceneLight) -> Self {
+    fn from_scene(light: &SceneLight, shadow_assignment: Option<(u32, u32)>) -> Self {
         let rotation = Matrix3::from_angle_z(Deg(light.rotation_degrees[2]))
             * Matrix3::from_angle_y(Deg(light.rotation_degrees[1]))
             * Matrix3::from_angle_x(Deg(light.rotation_degrees[0]));
@@ -180,12 +224,10 @@ impl GpuLight {
                 0.0,
                 1.0,
             ],
-            shadow: [
-                light.shadows_enabled as u32 as f32,
-                light.shadow_softness,
-                -1.0,
-                0.0,
-            ],
+            shadow: match shadow_assignment {
+                Some((base, count)) => [1.0, light.shadow_softness, base as f32, count as f32],
+                None => [0.0, light.shadow_softness, -1.0, 0.0],
+            },
         }
     }
 }

@@ -1,6 +1,10 @@
 use super::{AreaShape, LightKind, LightingManager, ViewportLightingMode};
 
-pub fn show(ui: &mut egui::Ui, manager: &mut LightingManager) {
+pub fn show(
+    ui: &mut egui::Ui,
+    manager: &mut LightingManager,
+    geometry_instances: &[(usize, String)],
+) {
     ui.heading("Lighting Mode");
     ui.horizontal_wrapped(|ui| {
         ui.selectable_value(
@@ -74,12 +78,38 @@ pub fn show(ui: &mut egui::Ui, manager: &mut LightingManager) {
         changed |= ui
             .checkbox(&mut light.viewport_enabled, "Enable in viewport")
             .changed();
+        let selected_target_name = light
+            .target_instance
+            .and_then(|target| {
+                geometry_instances
+                    .iter()
+                    .find(|(index, _)| *index == target)
+                    .map(|(_, name)| name.as_str())
+            })
+            .unwrap_or("None (Manual Rotation)");
+        egui::ComboBox::from_label("Look At")
+            .selected_text(selected_target_name)
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(&mut light.target_instance, None, "None (Manual Rotation)")
+                    .changed();
+                for (index, name) in geometry_instances {
+                    changed |= ui
+                        .selectable_value(&mut light.target_instance, Some(*index), name)
+                        .changed();
+                }
+            });
+        if light.target_instance.is_some() {
+            ui.small("Rotation is controlled by the selected geometry target.");
+        }
 
         ui.collapsing("Transform", |ui| {
             ui.label("Position");
             changed |= vector3(ui, &mut light.position, 0.05);
             ui.label("Rotation");
-            changed |= vector3(ui, &mut light.rotation_degrees, 0.5);
+            ui.add_enabled_ui(light.target_instance.is_none(), |ui| {
+                changed |= vector3(ui, &mut light.rotation_degrees, 0.5);
+            });
         });
 
         ui.collapsing("Color and Power", |ui| {
@@ -185,7 +215,7 @@ pub fn show(ui: &mut egui::Ui, manager: &mut LightingManager) {
             changed |= ui
                 .add(egui::Slider::new(&mut light.shadow_softness, 0.0..=10.0).text("Softness"))
                 .changed();
-            ui.label("Shadow-map rendering is reserved for the shadow pass.");
+            ui.label("Casts real-time mapped shadows onto scene geometry.");
         });
     } else {
         ui.label("No light selected");

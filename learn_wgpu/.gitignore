@@ -1,0 +1,71 @@
+# Generated builds and local output
+/target/
+/pkg/
+/output/
+/tmp/
+/dist/
+node_modules/
+
+# Local assets (import through the application)
+/res/
+/assets/
+/models/
+/textures/
+/hdri/
+*.[oO][bB][jJ]
+*.[mM][tT][lL]
+*.[fF][bB][xX]
+*.[gG][lL][bB]
+*.[gG][lL][tT][fF]
+*.blend
+*.blend1
+*.abc
+*.usd
+*.usda
+*.usdc
+*.usdz
+*.[hH][dD][rR]
+*.[eE][xX][rR]
+*.[rR][aA][tT]
+*.[pP][nN][gG]
+*.[jJ][pP][gG]
+*.[jJ][pP][eE][gG]
+*.[tT][iI][fF]
+*.[tT][iI][fF][fF]
+
+# Scene saves, material graph saves, and generated asset caches
+/saves/
+/test_saves/
+/autosaves/
+*.[fF][xX]
+*.[fF][xX].*
+# Material graphs can be saved under any JSON filename.
+*.json
+*.fxcache
+*.fxcache.*
+*.fxtexcache
+*.fxtexcache.*
+*.fxhdricache
+*.fxhdricache.*
+
+# Local credentials and environment configuration
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Machine-specific clutter
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.log

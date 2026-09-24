@@ -7,6 +7,26 @@ use wgpu::util::DeviceExt;
 
 use crate::Camera;
 
+#[cfg(not(target_arch = "wasm32"))]
+const ENVIRONMENT_CACHE_VERSION: u32 = 1;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PreparedEnvironment {
+    width: u32,
+    height: u32,
+    mips: Vec<Vec<f32>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EnvironmentCache {
+    version: u32,
+    source_len: u64,
+    source_modified_ns: u128,
+    maximum_edge: u32,
+    environment: PreparedEnvironment,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct EnvironmentUniform {
@@ -35,28 +55,9 @@ impl Environment {
     ) -> Result<Self> {
         const MAX_ENVIRONMENT_EDGE: u32 = 4096;
         let maximum_edge = MAX_ENVIRONMENT_EDGE.min(device.limits().max_texture_dimension_2d);
-        let image = load_environment_image(path, maximum_edge)?;
-        let original_dimensions = image.dimensions();
-        anyhow::ensure!(
-            original_dimensions.0 > 0 && original_dimensions.1 > 0,
-            "HDRI is empty"
-        );
-
-        // An 8K RGBA32F environment occupies 512 MiB on both the CPU and GPU.
-        // Consume the decoded buffer to avoid cloning it, then reduce oversized
-        // maps for predictable interactive viewport memory use.
-        let longest_edge = original_dimensions.0.max(original_dimensions.1);
-        let rgba = image.into_rgba32f();
-        let rgba = if longest_edge > maximum_edge {
-            let scale = maximum_edge as f64 / longest_edge as f64;
-            let width = (original_dimensions.0 as f64 * scale).round().max(1.0) as u32;
-            let height = (original_dimensions.1 as f64 * scale).round().max(1.0) as u32;
-            image::imageops::resize(&rgba, width, height, image::imageops::FilterType::Triangle)
-        } else {
-            rgba
-        };
-        let dimensions = rgba.dimensions();
-        let mip_level_count = 32 - dimensions.0.max(dimensions.1).leading_zeros();
+        let prepared = load_prepared_environment(path, maximum_edge)?;
+        let dimensions = (prepared.width, prepared.height);
+        let mip_level_count = prepared.mips.len() as u32;
 
         let size = wgpu::Extent3d {
             width: dimensions.0,
@@ -76,15 +77,7 @@ impl Environment {
         for mip_level in 0..mip_level_count {
             let mip_width = (dimensions.0 >> mip_level).max(1);
             let mip_height = (dimensions.1 >> mip_level).max(1);
-            let mip = (mip_level > 0).then(|| {
-                image::imageops::resize(
-                    &rgba,
-                    mip_width,
-                    mip_height,
-                    image::imageops::FilterType::Triangle,
-                )
-            });
-            let pixels = mip.as_ref().map_or(rgba.as_raw(), |image| image.as_raw());
+            let pixels = &prepared.mips[mip_level as usize];
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &texture,
@@ -92,7 +85,7 @@ impl Environment {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                bytemuck::cast_slice(pixels),
+                bytemuck::cast_slice(pixels.as_slice()),
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(16 * mip_width),
@@ -359,6 +352,99 @@ pub fn fallback_lighting_bind_group(
         ],
     });
     (texture, bind_group)
+}
+
+fn prepare_environment(path: &Path, maximum_edge: u32) -> Result<PreparedEnvironment> {
+    let image = load_environment_image(path, maximum_edge)?;
+    let original_dimensions = image.dimensions();
+    anyhow::ensure!(
+        original_dimensions.0 > 0 && original_dimensions.1 > 0,
+        "HDRI is empty"
+    );
+    let longest_edge = original_dimensions.0.max(original_dimensions.1);
+    let rgba = image.into_rgba32f();
+    let rgba = if longest_edge > maximum_edge {
+        let scale = maximum_edge as f64 / longest_edge as f64;
+        let width = (original_dimensions.0 as f64 * scale).round().max(1.0) as u32;
+        let height = (original_dimensions.1 as f64 * scale).round().max(1.0) as u32;
+        image::imageops::resize(&rgba, width, height, image::imageops::FilterType::Triangle)
+    } else {
+        rgba
+    };
+    let (width, height) = rgba.dimensions();
+    let mip_count = 32 - width.max(height).leading_zeros();
+    let mut mips = Vec::with_capacity(mip_count as usize);
+    mips.push(rgba.as_raw().clone());
+    for level in 1..mip_count {
+        let mip = image::imageops::resize(
+            &rgba,
+            (width >> level).max(1),
+            (height >> level).max(1),
+            image::imageops::FilterType::Triangle,
+        );
+        mips.push(mip.into_raw());
+    }
+    Ok(PreparedEnvironment {
+        width,
+        height,
+        mips,
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_prepared_environment(path: &Path, maximum_edge: u32) -> Result<PreparedEnvironment> {
+    prepare_environment(path, maximum_edge)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_prepared_environment(path: &Path, maximum_edge: u32) -> Result<PreparedEnvironment> {
+    let metadata = std::fs::metadata(path)?;
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_nanos());
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map_or_else(
+            || "fxhdricache".to_owned(),
+            |value| format!("{value}.fxhdricache"),
+        );
+    let cache_path = path.with_extension(extension);
+    if let Ok(file) = std::fs::File::open(&cache_path)
+        && let Ok(cache) =
+            bincode::deserialize_from::<_, EnvironmentCache>(std::io::BufReader::new(file))
+        && cache.version == ENVIRONMENT_CACHE_VERSION
+        && cache.source_len == metadata.len()
+        && cache.source_modified_ns == modified_ns
+        && cache.maximum_edge == maximum_edge
+        && !cache.environment.mips.is_empty()
+    {
+        return Ok(cache.environment);
+    }
+
+    let environment = prepare_environment(path, maximum_edge)?;
+    let cache = EnvironmentCache {
+        version: ENVIRONMENT_CACHE_VERSION,
+        source_len: metadata.len(),
+        source_modified_ns: modified_ns,
+        maximum_edge,
+        environment,
+    };
+    let temporary = cache_path.with_extension("fxhdricache.tmp");
+    if let Ok(file) = std::fs::File::create(&temporary) {
+        let mut writer = std::io::BufWriter::new(file);
+        if bincode::serialize_into(&mut writer, &cache).is_ok()
+            && std::io::Write::flush(&mut writer).is_ok()
+        {
+            let _ = std::fs::remove_file(&cache_path);
+            let _ = std::fs::rename(&temporary, &cache_path);
+        } else {
+            let _ = std::fs::remove_file(&temporary);
+        }
+    }
+    Ok(cache.environment)
 }
 
 fn load_environment_image(path: &Path, maximum_edge: u32) -> Result<image::DynamicImage> {

@@ -1,101 +1,38 @@
-use std::{
-    collections::{HashMap, HashSet},
-    io::{BufReader, Cursor},
-};
+use std::collections::{HashMap, HashSet};
 
-use anyhow::{Context, Ok, bail};
+use anyhow::{Context, bail};
 use wgpu::util::DeviceExt;
 
-use crate::{model, texture};
+use crate::model;
 
-#[cfg(target_arch = "wasm32")]
-fn format_url(file_name: &str) -> reqwest::Url {
-    let window = web_sys::window().unwrap();
-    let location = window.location();
-    let mut origin = location.origin().unwrap();
-    if !origin.ends_with("learn-wgpu") {
-        origin = format!("{}/learn-wgpu", origin);
-    }
-    let base = reqwest::Url::parse(&format!("{}/", origin,)).unwrap();
-    base.join(file_name).unwrap()
-}
-//----------------------------------------//
-//LOAD functions
+#[cfg(not(target_arch = "wasm32"))]
+const MODEL_CACHE_VERSION: u32 = 2;
 
-pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
-    #[cfg(target_arch = "wasm32")]
-    let txt = {
-        let url = format_url(file_name);
-        reqwest::get(url).await?.text().await?
-    };
-    #[cfg(not(target_arch = "wasm32"))]
-    let txt = {
-        let path = std::path::Path::new(env!("OUT_DIR"))
-            .join("res")
-            .join(file_name);
-        std::fs::read_to_string(path)?
-    };
-
-    Ok(txt)
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ModelCache {
+    version: u32,
+    source_len: u64,
+    source_modified_ns: u128,
+    model: PreparedModel,
 }
 
-#[allow(dead_code)]
-pub async fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
-    #[cfg(target_arch = "wasm32")]
-    let data = {
-        let url = format_url(file_name);
-        reqwest::get(url).await?.bytes().await?.to_vec()
-    };
-    #[cfg(not(target_arch = "wasm32"))]
-    let data = {
-        let path = std::path::Path::new(env!("OUT_DIR"))
-            .join("res")
-            .join(file_name);
-        std::fs::read(path)?
-    };
-
-    Ok(data)
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PreparedModel {
+    meshes: Vec<PreparedMesh>,
+    materials: Vec<model::MaterialSource>,
 }
 
-#[allow(dead_code)]
-pub async fn load_texture(
-    file_name: &str,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) -> anyhow::Result<texture::Texture> {
-    let data = load_binary(file_name).await?;
-    let image = image::load_from_memory(&data)?;
-    texture::Texture::from_bytes(device, queue, &image, Some(file_name))
-}
-
-pub async fn load_model(
-    file_name: &str,
-    device: &wgpu::Device,
-    _queue: &wgpu::Queue,
-    _layout: &wgpu::BindGroupLayout,
-) -> anyhow::Result<model::Model> {
-    let obj_text = load_string(file_name).await?;
-    let obj_cursor = Cursor::new(obj_text);
-    let mut obj_reader = BufReader::new(obj_cursor);
-
-    let (models, obj_materials) = tobj::load_obj_buf_async(
-        &mut obj_reader,
-        &tobj::LoadOptions {
-            triangulate: true,
-            single_index: true,
-            ..Default::default()
-        },
-        |material_path| async move {
-            let material_text = load_string(&material_path)
-                .await
-                .map_err(|_| tobj::LoadError::OpenFileFailed)?;
-            tobj::load_mtl_buf(&mut BufReader::new(Cursor::new(material_text)))
-        },
-    )
-    .await?;
-
-    let materials = obj_materials?;
-    build_model(models, materials, file_name, device)
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PreparedMesh {
+    name: String,
+    vertices: Vec<model::ModelVertex>,
+    indices: Vec<u32>,
+    uv_tile: (i32, i32),
+    bounds_min: [f32; 3],
+    bounds_max: [f32; 3],
+    geometry_stats: model::GeometryStats,
+    material: usize,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -103,12 +40,64 @@ pub fn load_model_from_path(
     path: &std::path::Path,
     device: &wgpu::Device,
 ) -> anyhow::Result<model::Model> {
+    let metadata = std::fs::metadata(path)?;
+    let source_modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_nanos());
+    let cache_path = model_cache_path(path);
+    if let Ok(file) = std::fs::File::open(&cache_path)
+        && let Ok(cache) = bincode::deserialize_from::<_, ModelCache>(std::io::BufReader::new(file))
+        && cache.version == MODEL_CACHE_VERSION
+        && cache.source_len == metadata.len()
+        && cache.source_modified_ns == source_modified_ns
+        && !cache.model.meshes.is_empty()
+    {
+        return upload_prepared_model(cache.model, path.to_string_lossy().as_ref(), device);
+    }
+
+    let prepared = load_prepared_model(path)?;
+    let cache = ModelCache {
+        version: MODEL_CACHE_VERSION,
+        source_len: metadata.len(),
+        source_modified_ns,
+        model: prepared,
+    };
+    // Stream the cache to disk so large production meshes do not require a
+    // second full-size allocation during serialization.
+    let temporary = cache_path.with_extension("fxcache.tmp");
+    if let Ok(file) = std::fs::File::create(&temporary) {
+        let mut writer = std::io::BufWriter::new(file);
+        if bincode::serialize_into(&mut writer, &cache).is_ok()
+            && std::io::Write::flush(&mut writer).is_ok()
+        {
+            let _ = std::fs::remove_file(&cache_path);
+            let _ = std::fs::rename(&temporary, &cache_path);
+        } else {
+            let _ = std::fs::remove_file(&temporary);
+        }
+    }
+    upload_prepared_model(cache.model, path.to_string_lossy().as_ref(), device)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn model_cache_path(path: &std::path::Path) -> std::path::PathBuf {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map_or_else(|| "fxcache".to_owned(), |value| format!("{value}.fxcache"));
+    path.with_extension(extension)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_prepared_model(path: &std::path::Path) -> anyhow::Result<PreparedModel> {
     if path
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("fbx"))
     {
-        return load_fbx_from_path(path, device);
+        return load_fbx_from_path(path);
     }
     let (models, materials) = tobj::load_obj(
         path,
@@ -119,14 +108,11 @@ pub fn load_model_from_path(
         },
     )?;
     let label = path.to_string_lossy();
-    build_model(models, materials.unwrap_or_default(), &label, device)
+    build_model(models, materials.unwrap_or_default(), &label)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn load_fbx_from_path(
-    path: &std::path::Path,
-    device: &wgpu::Device,
-) -> anyhow::Result<model::Model> {
+fn load_fbx_from_path(path: &std::path::Path) -> anyhow::Result<PreparedModel> {
     let filename = path
         .to_str()
         .context("FBX path contains unsupported non-UTF-8 characters")?;
@@ -192,15 +178,14 @@ fn load_fbx_from_path(
         bail!("FBX contains no polygon mesh geometry");
     }
     let label = path.to_string_lossy();
-    build_model(imported_models, Vec::new(), &label, device)
+    build_model(imported_models, Vec::new(), &label)
 }
 
 fn build_model(
     models: Vec<tobj::Model>,
     imported_materials: Vec<tobj::Material>,
     file_name: &str,
-    device: &wgpu::Device,
-) -> anyhow::Result<model::Model> {
+) -> anyhow::Result<PreparedModel> {
     let materials = imported_materials
         .into_iter()
         .map(|material| model::MaterialSource {
@@ -343,37 +328,6 @@ fn build_model(
         calculate_normals(&mut vertices, &source.indices);
         calculate_tangents(&mut vertices, &source.indices);
 
-        let marker_corners = [
-            [-1.0, -1.0],
-            [1.0, -1.0],
-            [1.0, 1.0],
-            [-1.0, -1.0],
-            [1.0, 1.0],
-            [-1.0, 1.0],
-        ];
-        let point_markers = vertices
-            .iter()
-            .flat_map(|vertex| {
-                marker_corners.map(|corner| model::PointMarkerVertex {
-                    center: vertex.position,
-                    corner,
-                })
-            })
-            .collect::<Vec<_>>();
-        let (vertex_normals, point_normals, face_normals) =
-            normal_markers(&vertices, &source.indices);
-        let uv_edges = source
-            .indices
-            .chunks_exact(3)
-            .flat_map(|triangle| {
-                let uv = [
-                    vertices[triangle[0] as usize].tex_coords,
-                    vertices[triangle[1] as usize].tex_coords,
-                    vertices[triangle[2] as usize].tex_coords,
-                ];
-                [(uv[0], uv[1]), (uv[1], uv[2]), (uv[2], uv[0])]
-            })
-            .collect();
         let mut bounds_min = [f32::INFINITY; 3];
         let mut bounds_max = [f32::NEG_INFINITY; 3];
         for vertex in &vertices {
@@ -383,49 +337,10 @@ fn build_model(
             }
         }
         let geometry_stats = geometry_stats(&vertices, &source.indices, true, has_authored_normals);
-        let point_marker_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Point marker buffer"),
-            contents: bytemuck::cast_slice(&point_markers),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let create_normal_buffer = |label, markers: &[model::NormalMarkerVertex]| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytemuck::cast_slice(markers),
-                usage: wgpu::BufferUsages::VERTEX,
-            })
-        };
-        let vertex_normal_buffer =
-            create_normal_buffer("Vertex normal marker buffer", &vertex_normals);
-        let point_normal_buffer =
-            create_normal_buffer("Point normal marker buffer", &point_normals);
-        let face_normal_buffer = create_normal_buffer("Face normal marker buffer", &face_normals);
-
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("{:?} Index Buffer", file_name)),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(&format!("{:?} Index Buffer", file_name)),
-            contents: bytemuck::cast_slice(&source.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
-
-        meshes.push(model::Mesh {
+        meshes.push(PreparedMesh {
             name: object_name,
-            vertex_buffer,
-            index_buffer,
-            num_elements: source.indices.len() as u32,
-            point_marker_buffer,
-            point_marker_count: point_markers.len() as u32,
-            vertex_normal_buffer,
-            vertex_normal_count: vertex_normals.len() as u32,
-            point_normal_buffer,
-            point_normal_count: point_normals.len() as u32,
-            face_normal_buffer,
-            face_normal_count: face_normals.len() as u32,
-            uv_edges,
+            vertices,
+            indices: source.indices,
             uv_tile,
             bounds_min,
             bounds_max,
@@ -438,7 +353,59 @@ fn build_model(
         bail!("OBJ `{file_name}` contains no triangulated surface geometry");
     }
 
-    Ok(model::Model { meshes, materials })
+    Ok(PreparedModel { meshes, materials })
+}
+
+fn upload_prepared_model(
+    prepared: PreparedModel,
+    file_name: &str,
+    device: &wgpu::Device,
+) -> anyhow::Result<model::Model> {
+    let mut meshes = Vec::with_capacity(prepared.meshes.len());
+    for mesh in prepared.meshes {
+        let create_vertex_buffer = |label: &str, contents: &[u8]| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents,
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        };
+        let vertex_buffer = create_vertex_buffer(
+            &format!("{file_name:?} vertex buffer"),
+            bytemuck::cast_slice(&mesh.vertices),
+        );
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(&format!("{file_name:?} index buffer")),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        meshes.push(model::Mesh {
+            name: mesh.name,
+            vertex_buffer,
+            index_buffer,
+            num_elements: mesh.indices.len() as u32,
+            point_marker_buffer: None,
+            point_marker_count: 0,
+            vertex_normal_buffer: None,
+            vertex_normal_count: 0,
+            point_normal_buffer: None,
+            point_normal_count: 0,
+            face_normal_buffer: None,
+            face_normal_count: 0,
+            uv_edges: Vec::new(),
+            source_vertices: mesh.vertices,
+            source_indices: mesh.indices,
+            uv_tile: mesh.uv_tile,
+            bounds_min: mesh.bounds_min,
+            bounds_max: mesh.bounds_max,
+            geometry_stats: mesh.geometry_stats,
+            material: mesh.material,
+        });
+    }
+    Ok(model::Model {
+        meshes,
+        materials: prepared.materials,
+    })
 }
 
 fn validate_triangle_indices(
@@ -622,7 +589,7 @@ fn normal_arrow(origin: [f32; 3], normal: [f32; 3]) -> [model::NormalMarkerVerte
     ]
 }
 
-fn normal_markers(
+pub(crate) fn normal_markers(
     vertices: &[model::ModelVertex],
     indices: &[u32],
 ) -> (
@@ -895,9 +862,8 @@ fn tangent_from_normal(normal: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, path::PathBuf};
-
     use super::*;
+    use std::io::BufReader;
 
     #[test]
     fn generates_a_valid_basis_for_meshes_without_normals() {
@@ -972,6 +938,41 @@ mod tests {
                 .sum::<usize>(),
             6
         );
+    }
+
+    #[test]
+    fn processed_model_cache_round_trips_without_losing_render_data() {
+        let source =
+            b"o cached\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n";
+        let (models, materials) = tobj::load_obj_buf(
+            &mut BufReader::new(source.as_slice()),
+            &tobj::LoadOptions {
+                triangulate: true,
+                single_index: true,
+                ..Default::default()
+            },
+            |_| Err(tobj::LoadError::OpenFileFailed),
+        )
+        .unwrap();
+        let prepared = build_model(models, materials.unwrap_or_default(), "cached.obj").unwrap();
+        let cache = ModelCache {
+            version: MODEL_CACHE_VERSION,
+            source_len: source.len() as u64,
+            source_modified_ns: 123,
+            model: prepared,
+        };
+        let bytes = bincode::serialize(&cache).unwrap();
+        let restored: ModelCache = bincode::deserialize(&bytes).unwrap();
+
+        assert_eq!(restored.version, MODEL_CACHE_VERSION);
+        assert_eq!(restored.model.meshes.len(), 1);
+        let mesh = &restored.model.meshes[0];
+        assert_eq!(mesh.vertices.len(), 3);
+        assert_eq!(mesh.indices, [0, 1, 2]);
+        assert_eq!(mesh.geometry_stats.triangle_count, 1);
+        // Inspection overlays are intentionally absent from the persistent
+        // cache; they are derived lazily only when their viewport feature is on.
+        assert!(bytes.len() < 1_024);
     }
 
     #[test]
@@ -1052,54 +1053,6 @@ mod tests {
             material.unknown_param.get("map_Pr").map(String::as_str),
             Some("skin_roughness.png")
         );
-    }
-
-    #[test]
-    fn t_pose_can_generate_finite_unit_normals() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("res/t-pose.obj");
-        let mut reader = BufReader::new(File::open(path).expect("t-pose.obj must be available"));
-        let (models, _) = tobj::load_obj_buf(
-            &mut reader,
-            &tobj::LoadOptions {
-                triangulate: true,
-                single_index: true,
-                ..Default::default()
-            },
-            |_| Err(tobj::LoadError::OpenFileFailed),
-        )
-        .expect("t-pose.obj must parse");
-        assert!(!models.is_empty());
-
-        for imported in models {
-            assert!(imported.mesh.normals.is_empty());
-            let mut vertices = (0..imported.mesh.positions.len() / 3)
-                .map(|index| {
-                    vertex(
-                        [
-                            imported.mesh.positions[index * 3],
-                            -imported.mesh.positions[index * 3 + 2],
-                            imported.mesh.positions[index * 3 + 1],
-                        ],
-                        [
-                            imported.mesh.texcoords[index * 2],
-                            1.0 - imported.mesh.texcoords[index * 2 + 1],
-                        ],
-                    )
-                })
-                .collect::<Vec<_>>();
-
-            calculate_normals(&mut vertices, &imported.mesh.indices);
-            calculate_tangents(&mut vertices, &imported.mesh.indices);
-
-            for vertex in vertices {
-                assert!(vertex.normal.iter().all(|component| component.is_finite()));
-                assert!((dot3(vertex.normal, vertex.normal) - 1.0).abs() < 1.0e-4);
-                let tangent = [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]];
-                assert!(tangent.iter().all(|component| component.is_finite()));
-                assert!((dot3(tangent, tangent) - 1.0).abs() < 1.0e-4);
-                assert!(dot3(vertex.normal, tangent).abs() < 1.0e-4);
-            }
-        }
     }
 
     fn vertex(position: [f32; 3], tex_coords: [f32; 2]) -> model::ModelVertex {

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LightId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,7 +70,7 @@ impl LightKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneLight {
     pub id: LightId,
     pub name: String,
@@ -79,6 +79,8 @@ pub struct SceneLight {
     pub kind: LightKind,
     pub position: [f32; 3],
     pub rotation_degrees: [f32; 3],
+    #[serde(default)]
+    pub target_instance: Option<usize>,
     pub color: [f32; 3],
     pub use_temperature: bool,
     pub temperature_kelvin: f32,
@@ -116,6 +118,7 @@ impl SceneLight {
             kind,
             position: [0.0, 0.0, 2.0],
             rotation_degrees: [45.0, 0.0, 35.0],
+            target_instance: None,
             color: [1.0, 1.0, 1.0],
             use_temperature: false,
             temperature_kelvin: 6500.0,
