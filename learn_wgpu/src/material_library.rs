@@ -27,6 +27,7 @@ pub struct SceneMaterial {
     pub base_color_path: String,
     pub normal_path: String,
     pub roughness_path: String,
+    pub emissive_path: String,
 }
 
 impl SceneMaterial {
@@ -38,6 +39,7 @@ impl SceneMaterial {
             base_color_path: self.base_color_path.clone(),
             normal_path: self.normal_path.clone(),
             roughness_path: self.roughness_path.clone(),
+            emissive_path: self.emissive_path.clone(),
         }
     }
 }

@@ -104,6 +104,8 @@ impl Vertex for ModelVertex {
 pub struct Model {
     pub meshes: Vec<Mesh>,
     pub materials: Vec<MaterialSource>,
+    pub import_warnings: Vec<String>,
+    pub imported_scene: Option<crate::usd_import::ImportedScene>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -113,6 +115,17 @@ pub struct MaterialSource {
     pub diffuse_texture: String,
     pub normal_texture: String,
     pub roughness_texture: String,
+    pub emissive_texture: String,
+    #[serde(default)]
+    pub pbr: Option<ImportedPbr>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ImportedPbr {
+    pub metallic: f32,
+    pub roughness: f32,
+    pub opacity: f32,
+    pub emissive: [f32; 3],
 }
 
 pub struct Mesh {

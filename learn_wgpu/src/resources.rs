@@ -6,7 +6,7 @@ use wgpu::util::DeviceExt;
 use crate::model;
 
 #[cfg(not(target_arch = "wasm32"))]
-const MODEL_CACHE_VERSION: u32 = 2;
+const MODEL_CACHE_VERSION: u32 = 5;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -18,9 +18,11 @@ struct ModelCache {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct PreparedModel {
+pub(crate) struct PreparedModel {
     meshes: Vec<PreparedMesh>,
     materials: Vec<model::MaterialSource>,
+    import_warnings: Vec<String>,
+    imported_scene: Option<crate::usd_import::ImportedScene>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -36,10 +38,14 @@ struct PreparedMesh {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub fn load_model_from_path(
-    path: &std::path::Path,
-    device: &wgpu::Device,
-) -> anyhow::Result<model::Model> {
+pub(crate) fn prepare_model_from_path(
+    path: &std::path::Path, time_code: Option<f64>,
+) -> anyhow::Result<PreparedModel> {
+    // A USD stage depends on layers, references, variants, and external textures.
+    // Always recompose it; a root-file-only OBJ/FBX cache cannot validate those dependencies.
+    if crate::usd_import::is_usd(path) {
+        return load_usd_from_path(path, time_code);
+    }
     let metadata = std::fs::metadata(path)?;
     let source_modified_ns = metadata
         .modified()
@@ -48,13 +54,13 @@ pub fn load_model_from_path(
         .map_or(0, |duration| duration.as_nanos());
     let cache_path = model_cache_path(path);
     if let Ok(file) = std::fs::File::open(&cache_path)
-        && let Ok(cache) = bincode::deserialize_from::<_, ModelCache>(std::io::BufReader::new(file))
+        && let Ok(cache) = read_model_cache(std::io::BufReader::new(file))
         && cache.version == MODEL_CACHE_VERSION
         && cache.source_len == metadata.len()
         && cache.source_modified_ns == source_modified_ns
         && !cache.model.meshes.is_empty()
     {
-        return upload_prepared_model(cache.model, path.to_string_lossy().as_ref(), device);
+        return Ok(cache.model);
     }
 
     let prepared = load_prepared_model(path)?;
@@ -78,7 +84,24 @@ pub fn load_model_from_path(
             let _ = std::fs::remove_file(&temporary);
         }
     }
-    upload_prepared_model(cache.model, path.to_string_lossy().as_ref(), device)
+    Ok(cache.model)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_model_cache(mut reader: impl std::io::Read + std::io::Seek) -> anyhow::Result<ModelCache> {
+    use bincode::Options;
+    use std::io::SeekFrom;
+    // Check the format before decoding schema-dependent vectors and strings.
+    // Old material layouts must never be interpreted as lengths in the new layout.
+    let length = reader.seek(SeekFrom::End(0))?;
+    reader.rewind()?;
+    let version: u32 = bincode::deserialize_from(&mut reader)?;
+    anyhow::ensure!(version == MODEL_CACHE_VERSION, "Outdated model cache");
+    reader.rewind()?;
+    Ok(bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(length)
+        .deserialize_from(reader)?)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -109,6 +132,28 @@ fn load_prepared_model(path: &std::path::Path) -> anyhow::Result<PreparedModel> 
     )?;
     let label = path.to_string_lossy();
     build_model(models, materials.unwrap_or_default(), &label)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_usd_from_path(path: &std::path::Path, time_code: Option<f64>) -> anyhow::Result<PreparedModel> {
+    let scene = crate::usd_import::load(path, time_code)?;
+    log::info!("Composed USD at time code {}", scene.time_code);
+    let models: Vec<_> = scene.meshes.into_iter().map(|mesh| tobj::Model {
+        name: mesh.name,
+        mesh: tobj::Mesh {
+            positions: mesh.positions, normals: mesh.normals, texcoords: mesh.texcoords,
+            indices: mesh.indices, material_id: Some(mesh.material), ..Default::default()
+        },
+    }).collect();
+    let mut prepared = if models.is_empty() {
+        PreparedModel { meshes: Vec::new(), materials: Vec::new(), import_warnings: Vec::new(), imported_scene: None }
+    } else {
+        build_model_with_normals(models, Vec::new(), &path.to_string_lossy(), true)?
+    };
+    prepared.materials = scene.materials;
+    prepared.import_warnings = scene.warnings;
+    prepared.imported_scene = Some(scene.scene);
+    Ok(prepared)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -186,13 +231,26 @@ fn build_model(
     imported_materials: Vec<tobj::Material>,
     file_name: &str,
 ) -> anyhow::Result<PreparedModel> {
+    build_model_with_normals(models, imported_materials, file_name, false)
+}
+
+fn build_model_with_normals(
+    models: Vec<tobj::Model>, imported_materials: Vec<tobj::Material>, file_name: &str,
+    preserve_normals: bool,
+) -> anyhow::Result<PreparedModel> {
     let materials = imported_materials
         .into_iter()
         .map(|material| model::MaterialSource {
             name: material.name,
             diffuse: material.diffuse,
+            pbr: None,
             diffuse_texture: material.diffuse_texture,
             normal_texture: material.normal_texture,
+            emissive_texture: material
+                .unknown_param
+                .get("map_Ke")
+                .cloned()
+                .unwrap_or_default(),
             roughness_texture: material
                 .unknown_param
                 .get("map_Pr")
@@ -325,7 +383,9 @@ fn build_model(
         // Rebuild a continuous viewport normal field even when the OBJ carries
         // split/flat export normals. This is Phong-style smooth shading: only
         // the shading basis changes; polygon positions and UVs remain exact.
-        calculate_normals(&mut vertices, &source.indices);
+        if !preserve_normals || !has_authored_normals {
+            calculate_normals(&mut vertices, &source.indices);
+        }
         calculate_tangents(&mut vertices, &source.indices);
 
         let mut bounds_min = [f32::INFINITY; 3];
@@ -353,10 +413,10 @@ fn build_model(
         bail!("OBJ `{file_name}` contains no triangulated surface geometry");
     }
 
-    Ok(PreparedModel { meshes, materials })
+    Ok(PreparedModel { meshes, materials, import_warnings: Vec::new(), imported_scene: None })
 }
 
-fn upload_prepared_model(
+pub(crate) fn upload_prepared_model(
     prepared: PreparedModel,
     file_name: &str,
     device: &wgpu::Device,
@@ -405,6 +465,8 @@ fn upload_prepared_model(
     Ok(model::Model {
         meshes,
         materials: prepared.materials,
+        import_warnings: prepared.import_warnings,
+        imported_scene: prepared.imported_scene,
     })
 }
 
@@ -866,6 +928,24 @@ mod tests {
     use std::io::BufReader;
 
     #[test]
+    #[ignore = "local USD benchmark; set LEARN_WGPU_USD_BENCHMARK_ASSET"]
+    fn benchmark_usd_preparation() {
+        let Some(path) = std::env::var_os("LEARN_WGPU_USD_BENCHMARK_ASSET") else {
+            return;
+        };
+        let started = std::time::Instant::now();
+        let prepared = prepare_model_from_path(std::path::Path::new(&path), None).unwrap();
+        let elapsed = started.elapsed();
+        eprintln!(
+            "USD preparation: {:.3}s, {} groups, {} triangles, {} materials",
+            elapsed.as_secs_f64(), prepared.meshes.len(),
+            prepared.meshes.iter().map(|mesh| mesh.indices.len() / 3).sum::<usize>(),
+            prepared.materials.len(),
+        );
+        assert!(elapsed.as_secs_f64() < 20.0, "USD preparation exceeded 20 seconds: {elapsed:?}");
+    }
+
+    #[test]
     fn generates_a_valid_basis_for_meshes_without_normals() {
         let mut vertices = [
             vertex([-1.0, -1.0, 0.0], [0.0, 0.0]),
@@ -941,6 +1021,14 @@ mod tests {
     }
 
     #[test]
+    fn outdated_model_cache_is_rejected_before_decoding_materials() {
+        let mut bytes = (MODEL_CACHE_VERSION - 1).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&[255; 64]);
+        let error = read_model_cache(std::io::Cursor::new(bytes)).err().unwrap();
+        assert!(error.to_string().contains("Outdated"));
+    }
+
+    #[test]
     fn processed_model_cache_round_trips_without_losing_render_data() {
         let source =
             b"o cached\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nf 1/1 2/2 3/3\n";
@@ -962,7 +1050,7 @@ mod tests {
             model: prepared,
         };
         let bytes = bincode::serialize(&cache).unwrap();
-        let restored: ModelCache = bincode::deserialize(&bytes).unwrap();
+        let restored = read_model_cache(std::io::Cursor::new(&bytes)).unwrap();
 
         assert_eq!(restored.version, MODEL_CACHE_VERSION);
         assert_eq!(restored.model.meshes.len(), 1);

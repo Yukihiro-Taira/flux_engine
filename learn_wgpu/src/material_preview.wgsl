@@ -1,5 +1,7 @@
 struct MaterialUniform {
     base_color: vec4<f32>,
+    color_adjustments: vec4<f32>,
+    emissive_color: vec4<f32>,
     properties: vec4<f32>,
     options: vec4<f32>,
     inspection: vec4<f32>,
@@ -13,6 +15,8 @@ struct MaterialUniform {
 @group(0) @binding(3) var normal_sampler: sampler;
 @group(0) @binding(4) var mr_texture: texture_2d<f32>;
 @group(0) @binding(5) var mr_sampler: sampler;
+@group(0) @binding(7) var emissive_texture: texture_2d<f32>;
+@group(0) @binding(8) var emissive_sampler: sampler;
 @group(0) @binding(6) var<uniform> material: MaterialUniform;
 @group(1) @binding(0) var environment_texture: texture_2d<f32>;
 @group(1) @binding(1) var environment_sampler: sampler;
@@ -54,7 +58,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         atan2(geometric_normal.y, geometric_normal.x) / (2.0 * pi) + 0.5,
         0.5 - asin(geometric_normal.z) / pi
     );
-    let base = textureSample(base_texture, base_sampler, sphere_uv).rgb * material.base_color.rgb;
+    let base = rotate_hue(textureSample(base_texture, base_sampler, sphere_uv).rgb * material.base_color.rgb, material.color_adjustments.x);
+    let emission_map = textureSample(emissive_texture, emissive_sampler, sphere_uv).rgb;
+    let emission_source = select(base, emission_map, material.color_adjustments.z > 0.5);
+    let emission = rotate_hue(emission_source * material.emissive_color.rgb, material.color_adjustments.y) * material.options.y;
     let sampled_normal = textureSample(normal_texture, normal_sampler, sphere_uv).xyz * 2.0 - 1.0;
     let tangent = normalize(vec3<f32>(-geometric_normal.y, geometric_normal.x, 0.0001));
     let bitangent = normalize(cross(geometric_normal, tangent));
@@ -74,7 +81,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let specular_color = mix(vec3<f32>(0.04), base, vec3<f32>(metallic));
     var color = diffuse * 2.0
         + environment * specular_color * (1.0 - roughness * 0.75)
-        + base * material.options.y;
+        + emission;
     color = color / (color + vec3<f32>(1.0));
     return vec4<f32>(color, 1.0);
+}
+
+fn rotate_hue(color: vec3<f32>, degrees: f32) -> vec3<f32> {
+    let angle = degrees * 0.01745329252;
+    let axis = vec3<f32>(0.57735026919);
+    return max(color * cos(angle) + cross(axis, color) * sin(angle)
+        + axis * dot(axis, color) * (1.0 - cos(angle)), vec3<f32>(0.0));
 }

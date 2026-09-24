@@ -261,6 +261,7 @@ impl ShadowRenderer {
         model: &'a model::Model,
         group_enabled: &[bool],
         instance_buffer: &'a wgpu::Buffer,
+        group_instance_buffers: &'a [wgpu::Buffer],
         instance_count: u32,
         generated: impl Iterator<Item = &'a crate::ground_plane::GroundPlane>,
     ) {
@@ -288,6 +289,7 @@ impl ShadowRenderer {
                 if !group_enabled.get(index).copied().unwrap_or(true) {
                     continue;
                 }
+                pass.set_vertex_buffer(1, group_instance_buffers.get(index).unwrap_or(instance_buffer).slice(..));
                 pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
                 pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.num_elements, 0, 0..instance_count);

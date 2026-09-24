@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct EditorUi {
+    pub usd_use_stage_start: bool,
+    pub usd_time_code: f64,
     pub selected_instance: usize,
     pub visible_instance_count: usize,
     pub texture_enabled: bool,
@@ -11,12 +13,14 @@ pub struct EditorUi {
     pub pending_texture: Option<PathBuf>,
     pub pending_normal: Option<PathBuf>,
     pub pending_metallic_roughness: Option<PathBuf>,
+    pub pending_emissive: Option<PathBuf>,
     pub mtl_path_input: String,
     pub asset_name: String,
     pub texture_name: String,
     pub base_color_path: String,
     pub normal_path: String,
     pub metallic_roughness_path: String,
+    pub emissive_path: String,
     pub pending_hdri: Option<PathBuf>,
     pub hdri_name: Option<String>,
     pub hdri_path: String,
@@ -36,6 +40,8 @@ pub struct EditorUi {
 impl Default for EditorUi {
     fn default() -> Self {
         Self {
+            usd_use_stage_start: true,
+            usd_time_code: 0.0,
             selected_instance: 0,
             visible_instance_count: 0,
             texture_enabled: false,
@@ -45,12 +51,14 @@ impl Default for EditorUi {
             pending_texture: None,
             pending_normal: None,
             pending_metallic_roughness: None,
+            pending_emissive: None,
             mtl_path_input: String::new(),
             asset_name: "No model loaded".into(),
             texture_name: "None".into(),
             base_color_path: String::new(),
             normal_path: String::new(),
             metallic_roughness_path: String::new(),
+            emissive_path: String::new(),
             pending_hdri: None,
             hdri_name: None,
             hdri_path: String::new(),

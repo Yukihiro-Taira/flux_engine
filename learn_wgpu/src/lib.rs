@@ -1,3 +1,4 @@
+use anyhow::Context;
 use crate::texture::Texture;
 use cgmath::prelude::*;
 use model::Vertex;
@@ -23,7 +24,12 @@ use wgpu::util::DeviceExt;
 
 const GENERATED_SHAPE_LIGHT_TARGET_BASE: usize = usize::MAX / 2;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod asset_explorer;
 mod editor_ui;
+mod demos;
+mod user_data;
+mod preferences;
 mod egui_renderer;
 mod environment;
 mod grid;
@@ -38,6 +44,7 @@ mod model;
 mod navigation_gizmo;
 mod object_gizmo;
 mod resources;
+mod usd_import;
 mod texture;
 
 #[cfg(target_arch = "wasm32")]
@@ -278,6 +285,7 @@ struct UvSpaceTexture {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GroupTextureKind {
+    Emissive,
     BaseColor,
     Normal,
     Roughness,
@@ -294,7 +302,16 @@ struct PendingUvTexture {
     tile: (i32, i32),
     path: std::path::PathBuf,
     kind: GroupTextureKind,
+    enable_emission: bool,
     receiver: std::sync::mpsc::Receiver<Result<DecodedUvTexture, String>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct PendingModelLoad {
+    path: std::path::PathBuf,
+    time_code: Option<f64>,
+    loading_fx_project: bool,
+    receiver: std::sync::mpsc::Receiver<Result<resources::PreparedModel, String>>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -321,10 +338,12 @@ struct GeneratedGeometryUndo {
     base_color_path: String,
     normal_path: String,
     roughness_path: String,
+    emissive_path: String,
 }
 
 #[derive(Clone, PartialEq)]
 struct UndoSnapshot {
+    deconstruction: demos::Deconstruction,
     instances: Vec<Instance>,
     gizmo_at_bottom_by_instance: Vec<bool>,
     gizmo_always_at_bottom: bool,
@@ -344,6 +363,7 @@ struct UndoSnapshot {
     geo_texture_scales: BTreeMap<(i32, i32), f32>,
     geo_texture_colors: BTreeMap<(i32, i32), [f32; 4]>,
     geo_normal_strengths: BTreeMap<(i32, i32), f32>,
+    geo_color_settings: BTreeMap<(i32, i32), GroupColorSettings>,
 }
 
 type UvEdge = ([f32; 2], [f32; 2]);
@@ -353,6 +373,8 @@ const FX_PROJECT_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
 struct FxProject {
+    #[serde(default)]
+    deconstruction: demos::Deconstruction,
     format: String,
     version: u32,
     imported_model: Option<FxImportedModel>,
@@ -375,6 +397,8 @@ struct FxProject {
 
 #[derive(Serialize, Deserialize)]
 struct FxImportedModel {
+    #[serde(default)]
+    usd_time_code: Option<f64>,
     path: String,
     instances: Vec<FxTransform>,
     visible_instance_count: usize,
@@ -418,6 +442,10 @@ struct FxGeneratedObject {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct FxMaterial {
+    #[serde(default)]
+    color_adjustments: [f32; 4],
+    #[serde(default = "default_texture_color")]
+    emissive_color: [f32; 4],
     base_color: [f32; 4],
     properties: [f32; 4],
     options: [f32; 4],
@@ -425,6 +453,8 @@ struct FxMaterial {
     base_color_path: String,
     normal_path: String,
     roughness_path: String,
+    #[serde(default)]
+    emissive_path: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -434,12 +464,28 @@ struct FxLibraryMaterial {
     material: FxMaterial,
 }
 
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct GroupColorSettings {
+    hue: f32,
+    emission_hue: f32,
+    intensity: f32,
+    tint: [f32; 4],
+}
+impl Default for GroupColorSettings {
+    fn default() -> Self { Self { hue: 0.0, emission_hue: 0.0, intensity: 0.0, tint: [1.0; 4] } }
+}
+
 #[derive(Serialize, Deserialize)]
 struct FxGroupTextures {
     tile: (i32, i32),
     base_color: String,
     normal: String,
     roughness: String,
+    #[serde(default)]
+    emissive: String,
+    #[serde(default)]
+    colors: Option<GroupColorSettings>,
     #[serde(default = "default_texture_scale")]
     scale: f32,
     #[serde(default = "default_texture_color")]
@@ -536,6 +582,7 @@ pub struct State {
     show_uv_map: bool,
     show_uv_overlay: bool,
     selected_uv_space: usize,
+    uv_import_kind: GroupTextureKind,
     show_all_uv_spaces: bool,
     uv_space_offsets: BTreeMap<(i32, i32), egui::Vec2>,
     uv_space_cache: CachedUvSpaces,
@@ -546,18 +593,23 @@ pub struct State {
     geo_texture_paths: BTreeMap<(i32, i32), String>,
     geo_normal_paths: BTreeMap<(i32, i32), String>,
     geo_roughness_paths: BTreeMap<(i32, i32), String>,
+    geo_emissive_paths: BTreeMap<(i32, i32), String>,
     geo_normal_textures: BTreeMap<(i32, i32), texture::Texture>,
     geo_roughness_textures: BTreeMap<(i32, i32), texture::Texture>,
+    geo_emissive_textures: BTreeMap<(i32, i32), texture::Texture>,
     geo_material_bind_groups: BTreeMap<(i32, i32), wgpu::BindGroup>,
     geo_material_uniform_buffers: BTreeMap<(i32, i32), wgpu::Buffer>,
     geo_texture_scales: BTreeMap<(i32, i32), f32>,
     geo_texture_colors: BTreeMap<(i32, i32), [f32; 4]>,
     geo_normal_strengths: BTreeMap<(i32, i32), f32>,
+    geo_color_settings: BTreeMap<(i32, i32), GroupColorSettings>,
     #[cfg(not(target_arch = "wasm32"))]
     pending_uv_textures: Vec<PendingUvTexture>,
     #[cfg(not(target_arch = "wasm32"))]
     pending_model_material_root: Option<std::path::PathBuf>,
     pending_project: Option<FxProject>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pending_model_load: Option<PendingModelLoad>,
     project_path: String,
     fx_load_started: Option<Instant>,
     material_texture_cache: HashMap<(std::path::PathBuf, bool, u64, u128), Arc<texture::Texture>>,
@@ -565,6 +617,11 @@ pub struct State {
         HashMap<(ground_plane::BasicShape, u32, bool), ground_plane::SharedPrimitiveMesh>,
     show_uv_texture: bool,
     show_uv_lines: bool,
+    preferences: user_data::Preferences,
+    #[cfg(not(target_arch = "wasm32"))]
+    preference_store: user_data::PreferenceStore,
+    #[cfg(not(target_arch = "wasm32"))]
+    user_library: user_data::UserLibrary,
     viewport_settings_open: bool,
     viewport_settings_just_opened: bool,
     gizmo_at_bottom_by_instance: Vec<bool>,
@@ -591,17 +648,13 @@ pub struct State {
     lighting: lighting::LightingManager,
     shadow_renderer: lighting::shadow::ShadowRenderer,
     lighting_gpu: lighting::LightingGpu,
+    deconstruction: demos::Deconstruction,
+    demo_buffers: Vec<wgpu::Buffer>,
+    demo_cached: Option<(demos::Deconstruction, Vec<Instance>)>,
     active_side_panel: Option<usize>,
     explorer_open: bool,
-    explorer_path: std::path::PathBuf,
-    explorer_search: String,
-    explorer_history: Vec<std::path::PathBuf>,
-    explorer_history_index: usize,
-    explorer_icon_view: bool,
-    explorer_selected: Option<std::path::PathBuf>,
-    explorer_window_width: f32,
-    explorer_window_height: f32,
-    explorer_window_rect: Option<egui::Rect>,
+    #[cfg(not(target_arch = "wasm32"))]
+    asset_explorer: asset_explorer::AssetExplorer,
     generate_popup_open: bool,
     generate_popup_position: egui::Pos2,
     outliner_search: String,
@@ -670,11 +723,13 @@ impl State {
             base_color_path: object.base_color_path.clone(),
             normal_path: object.normal_path.clone(),
             roughness_path: object.roughness_path.clone(),
+            emissive_path: object.emissive_path.clone(),
         }
     }
 
     fn capture_undo_snapshot(&self) -> UndoSnapshot {
         UndoSnapshot {
+            deconstruction: self.deconstruction.clone(),
             instances: self.instances.clone(),
             gizmo_at_bottom_by_instance: self.gizmo_at_bottom_by_instance.clone(),
             gizmo_always_at_bottom: self.gizmo_always_at_bottom,
@@ -700,10 +755,12 @@ impl State {
             geo_texture_scales: self.geo_texture_scales.clone(),
             geo_texture_colors: self.geo_texture_colors.clone(),
             geo_normal_strengths: self.geo_normal_strengths.clone(),
+            geo_color_settings: self.geo_color_settings.clone(),
         }
     }
 
     fn restore_undo_snapshot(&mut self, snapshot: UndoSnapshot) {
+        self.deconstruction = snapshot.deconstruction;
         self.instances = snapshot.instances;
         self.gizmo_at_bottom_by_instance = snapshot.gizmo_at_bottom_by_instance;
         self.gizmo_always_at_bottom = snapshot.gizmo_always_at_bottom;
@@ -712,6 +769,7 @@ impl State {
         self.geo_texture_scales = snapshot.geo_texture_scales;
         self.geo_texture_colors = snapshot.geo_texture_colors;
         self.geo_normal_strengths = snapshot.geo_normal_strengths;
+        self.geo_color_settings = snapshot.geo_color_settings;
         self.pbr_material.upload(&self.queue);
         for entry in &self.material_library {
             entry.material.upload(&self.queue);
@@ -735,6 +793,7 @@ impl State {
                 .copied()
                 .unwrap_or(self.pbr_material.uniform.properties[2])
                 .clamp(0.0, 2.0);
+            self.apply_group_colors(*tile, &mut uniform);
             self.queue
                 .write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
         }
@@ -788,6 +847,7 @@ impl State {
             object.base_color_path = generated.base_color_path;
             object.normal_path = generated.normal_path;
             object.roughness_path = generated.roughness_path;
+            object.emissive_path = generated.emissive_path;
             let mesh_key = (
                 object.kind,
                 object.subdivisions,
@@ -820,6 +880,7 @@ impl State {
             .unwrap_or(0)
             .saturating_add(1);
         self.instance_buffer_dirty = true;
+        self.apply_user_preferences();
         self.editor.status = "Undid last action".to_owned();
         self.undo_transaction_active = false;
         self.undo_last_snapshot = Some(self.capture_undo_snapshot());
@@ -980,6 +1041,7 @@ impl State {
             base_color_path: String::new(),
             normal_path: String::new(),
             roughness_path: String::new(),
+            emissive_path: String::new(),
         }];
         let lighting = lighting::LightingManager::default();
         let shadow_renderer = lighting::shadow::ShadowRenderer::new(&device);
@@ -1309,6 +1371,8 @@ impl State {
         });
 
         let obj_model = model::Model {
+            import_warnings: Vec::new(),
+            imported_scene: None,
             meshes: Vec::new(),
             materials: Vec::new(),
         };
@@ -1330,7 +1394,9 @@ impl State {
         let displayed_grid_spacing = editor.grid_spacing;
         let displayed_grid_extent = editor.grid_size;
         let group_count = obj_model.meshes.len();
-        Ok(Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let preference_store = user_data::PreferenceStore::load();
+        let mut state = Self {
             surface,
             device,
             queue,
@@ -1356,6 +1422,7 @@ impl State {
             show_uv_map: false,
             show_uv_overlay: false,
             selected_uv_space: 0,
+            uv_import_kind: GroupTextureKind::BaseColor,
             show_all_uv_spaces: false,
             uv_space_offsets: BTreeMap::new(),
             uv_space_cache: Vec::new(),
@@ -1366,24 +1433,37 @@ impl State {
             geo_texture_paths: BTreeMap::new(),
             geo_normal_paths: BTreeMap::new(),
             geo_roughness_paths: BTreeMap::new(),
+            geo_emissive_paths: BTreeMap::new(),
             geo_normal_textures: BTreeMap::new(),
             geo_roughness_textures: BTreeMap::new(),
+            geo_emissive_textures: BTreeMap::new(),
             geo_material_bind_groups: BTreeMap::new(),
             geo_material_uniform_buffers: BTreeMap::new(),
             geo_texture_scales: BTreeMap::new(),
             geo_texture_colors: BTreeMap::new(),
             geo_normal_strengths: BTreeMap::new(),
+            geo_color_settings: BTreeMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_uv_textures: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pending_model_material_root: None,
             pending_project: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            pending_model_load: None,
             project_path: String::new(),
             fx_load_started: None,
             material_texture_cache: HashMap::new(),
             generated_mesh_cache: HashMap::new(),
             show_uv_texture: true,
             show_uv_lines: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            preferences: preference_store.saved.clone(),
+            #[cfg(target_arch = "wasm32")]
+            preferences: user_data::Preferences::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            preference_store,
+            #[cfg(not(target_arch = "wasm32"))]
+            user_library: user_data::UserLibrary::load(),
             viewport_settings_open: false,
             viewport_settings_just_opened: false,
             gizmo_at_bottom_by_instance: vec![false; instances.len()],
@@ -1408,20 +1488,13 @@ impl State {
             lighting,
             shadow_renderer,
             lighting_gpu,
+            deconstruction: demos::Deconstruction::default(),
+            demo_buffers: Vec::new(),
+            demo_cached: None,
             active_side_panel: Some(0),
             explorer_open: false,
-            explorer_path: std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            explorer_search: String::new(),
-            explorer_history: vec![
-                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-            ],
-            explorer_history_index: 0,
-            explorer_icon_view: true,
-            explorer_selected: None,
-            explorer_window_width: 360.0,
-            explorer_window_height: 560.0,
-            explorer_window_rect: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            asset_explorer: asset_explorer::AssetExplorer::default(),
             generate_popup_open: false,
             generate_popup_position: egui::pos2(320.0, 180.0),
             outliner_search: String::new(),
@@ -1462,7 +1535,9 @@ impl State {
             undo_stack: Vec::new(),
             undo_last_snapshot: None,
             undo_transaction_active: false,
-        })
+        };
+        state.apply_user_preferences();
+        Ok(state)
     }
 
     //----------------------------------------//
@@ -1812,51 +1887,29 @@ impl State {
     }
 
     fn frame_all_instances(&mut self) {
-        let visible_count = self.editor.visible_instance_count.min(self.instances.len());
-        let Some(first) = self.instances.first() else {
+        let mut bounds = self.instances.iter().take(self.editor.visible_instance_count)
+            .filter_map(|instance| self.instance_world_bounds(instance));
+        let Some((mut minimum, mut maximum)) = bounds.next() else {
             self.home_grid_view();
             return;
         };
-        if visible_count == 0 {
-            self.home_grid_view();
-            return;
+        for (low, high) in bounds {
+            minimum.x = minimum.x.min(low.x);
+            minimum.y = minimum.y.min(low.y);
+            minimum.z = minimum.z.min(low.z);
+            maximum.x = maximum.x.max(high.x);
+            maximum.y = maximum.y.max(high.y);
+            maximum.z = maximum.z.max(high.z);
         }
-
-        let mut minimum = first.position;
-        let mut maximum = first.position;
-        let mut max_scale =
-            first.scale.x.max(first.scale.y).max(first.scale.z) * first.global_scale;
-        for instance in self.instances.iter().take(visible_count) {
-            minimum.x = minimum.x.min(instance.position.x);
-            minimum.y = minimum.y.min(instance.position.y);
-            minimum.z = minimum.z.min(instance.position.z);
-            maximum.x = maximum.x.max(instance.position.x);
-            maximum.y = maximum.y.max(instance.position.y);
-            maximum.z = maximum.z.max(instance.position.z);
-            max_scale = max_scale.max(
-                instance.scale.x.max(instance.scale.y).max(instance.scale.z)
-                    * instance.global_scale,
-            );
-        }
-
         let center = (minimum + maximum) * 0.5;
-        let radius = ((maximum - minimum).magnitude() * 0.5 + max_scale).max(1.0);
-        self.frame_point(cgmath::Point3::new(center.x, center.y, center.z), radius);
+        let radius = ((maximum - minimum).magnitude() * 0.5).max(0.01);
+        self.frame_point(cgmath::Point3::from_vec(center), radius);
     }
 
     fn frame_selected_instance(&mut self) {
-        let Some(instance) = self.instances.get(self.editor.selected_instance) else {
-            return;
-        };
-        let center = cgmath::Point3::new(
-            instance.position.x,
-            instance.position.y,
-            instance.position.z,
-        );
-        let radius =
-            instance.scale.x.max(instance.scale.y).max(instance.scale.z) * instance.global_scale;
-        let radius = radius.max(0.5);
-        self.frame_point(center, radius);
+        let Some((minimum, maximum)) = self.instances.get(self.editor.selected_instance)
+            .and_then(|instance| self.instance_world_bounds(instance)) else { return; };
+        self.frame_point(cgmath::Point3::from_vec((minimum + maximum) * 0.5), ((maximum - minimum).magnitude() * 0.5).max(0.01));
     }
 
     fn frame_point(&mut self, center: cgmath::Point3<f32>, radius: f32) {
@@ -1864,12 +1917,14 @@ impl State {
         self.camera.target = center;
         match self.camera.projection_mode {
             ProjectionMode::Perspective => {
-                let half_fov = (self.camera.fovy.to_radians() * 0.5).max(0.01);
-                let distance = (radius / half_fov.sin()).max(radius * 2.0);
+                let vertical_half = (self.camera.fovy.to_radians() * 0.5).max(0.01);
+                let horizontal_half = (vertical_half.tan() * self.camera.aspect.max(0.01)).atan();
+                let half_fov = vertical_half.min(horizontal_half);
+                let distance = (radius * 1.15 / half_fov.sin()).max(radius * 2.0);
                 self.camera.eye = center + view_direction * distance;
             }
             ProjectionMode::Orthographic => {
-                self.camera.ortho_scale = (radius * 2.4).max(0.01);
+                self.camera.ortho_scale = (radius * 2.4 / self.camera.aspect.min(1.0).max(0.01)).max(0.01);
                 let distance = (self.camera.eye - center).magnitude().max(radius * 2.0);
                 self.camera.eye = center + view_direction * distance;
             }
@@ -2017,21 +2072,22 @@ impl State {
         &self,
         instance: &Instance,
     ) -> Option<(cgmath::Vector3<f32>, cgmath::Vector3<f32>)> {
-        let (minimum, maximum) = self.model_local_bounds()?;
-        let model: cgmath::Matrix4<f32> = instance.to_raw().model.into();
+        if self.obj_model.meshes.is_empty() { return None; }
         let mut world_min = cgmath::Vector3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
-        let mut world_max =
-            cgmath::Vector3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-        for x in [minimum.x, maximum.x] {
-            for y in [minimum.y, maximum.y] {
-                for z in [minimum.z, maximum.z] {
-                    let point = model.transform_point(cgmath::Point3::new(x, y, z)).to_vec();
-                    world_min.x = world_min.x.min(point.x);
-                    world_min.y = world_min.y.min(point.y);
-                    world_min.z = world_min.z.min(point.z);
-                    world_max.x = world_max.x.max(point.x);
-                    world_max.y = world_max.y.max(point.y);
-                    world_max.z = world_max.z.max(point.z);
+        let mut world_max = cgmath::Vector3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for (group, mesh) in self.obj_model.meshes.iter().enumerate() {
+            let model: cgmath::Matrix4<f32> = self.demo_instance_raw(instance, group).model.into();
+            for x in [mesh.bounds_min[0], mesh.bounds_max[0]] {
+                for y in [mesh.bounds_min[1], mesh.bounds_max[1]] {
+                    for z in [mesh.bounds_min[2], mesh.bounds_max[2]] {
+                        let point = model.transform_point(cgmath::Point3::new(x, y, z)).to_vec();
+                        world_min.x = world_min.x.min(point.x);
+                        world_min.y = world_min.y.min(point.y);
+                        world_min.z = world_min.z.min(point.z);
+                        world_max.x = world_max.x.max(point.x);
+                        world_max.y = world_max.y.max(point.y);
+                        world_max.z = world_max.z.max(point.z);
+                    }
                 }
             }
         }
@@ -2171,34 +2227,18 @@ impl State {
         let near = near_clip.truncate() / near_clip.w;
         let far = far_clip.truncate() / far_clip.w;
         let ray = (far - near).normalize();
-        let Some((bounds_min, bounds_max)) = self.model_local_bounds() else {
-            return;
-        };
-        let mut closest = None;
-        for (index, instance) in self
-            .instances
-            .iter()
-            .take(self.editor.visible_instance_count)
-            .enumerate()
-        {
-            let model: cgmath::Matrix4<f32> = instance.to_raw().model.into();
-            let Some(inverse_model) = model.invert() else {
-                continue;
-            };
-            let local_origin = inverse_model
-                .transform_point(cgmath::Point3::from_vec(near))
-                .to_vec();
-            let local_direction = inverse_model.transform_vector(ray);
-            if let Some(local_distance) =
-                ray_box_distance(local_origin, local_direction, bounds_min, bounds_max)
-            {
-                let local_hit = local_origin + local_direction * local_distance;
-                let world_hit = model
-                    .transform_point(cgmath::Point3::from_vec(local_hit))
-                    .to_vec();
-                let world_distance = (world_hit - near).magnitude2();
-                if closest.is_none_or(|(_, distance)| world_distance < distance) {
-                    closest = Some((index, world_distance));
+        let mut closest: Option<(usize, f32)> = None;
+        for (index, instance) in self.instances.iter().take(self.editor.visible_instance_count).enumerate() {
+            for (group, mesh) in self.obj_model.meshes.iter().enumerate() {
+                if !self.geo_group_enabled.get(group).copied().unwrap_or(true) { continue; }
+                let model: cgmath::Matrix4<f32> = self.demo_instance_raw(instance, group).model.into();
+                let Some(inverse_model) = model.invert() else { continue; };
+                let local_origin = inverse_model.transform_point(cgmath::Point3::from_vec(near)).to_vec();
+                let local_direction = inverse_model.transform_vector(ray);
+                if let Some(distance) = ray_box_distance(local_origin, local_direction, mesh.bounds_min.into(), mesh.bounds_max.into()) {
+                    let hit = model.transform_point(cgmath::Point3::from_vec(local_origin + local_direction * distance)).to_vec();
+                    let world_distance = (hit - near).magnitude2();
+                    if closest.is_none_or(|(_, d)| world_distance < d) { closest = Some((index, world_distance)); }
                 }
             }
         }
@@ -2525,19 +2565,21 @@ impl State {
             egui::Window::new("Object")
                 // Version the id when the sizing policy changes so an old forced
                 // height cannot override the new content-driven initial layout.
-                .id(egui::Id::new("viewport_editor_window_scrollable_v5"))
+                .id(egui::Id::new("viewport_editor_window_scrollable_v6"))
                 .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-170.0, 12.0))
                 .default_width(object_panel_width)
                 .default_height(panel_max_height)
                 .min_width(320.0)
                 .min_height(160.0)
-                .max_width((context.content_rect().width() - 180.0).max(320.0))
+                .max_width(object_panel_width)
                 .max_height(panel_max_height)
                 .resizable(true)
                 .collapsible(true)
                 .constrain(true)
                 .vscroll(true)
                 .show(ui, |ui| {
+                    ui.set_width(object_panel_width - 24.0);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     egui::CollapsingHeader::new("Project & Model Import")
                         .default_open(true)
                         .show(ui, |ui| self.asset_drop_ui(ui));
@@ -2559,7 +2601,7 @@ impl State {
                         ui.label("Select an object to edit its controls.");
                     }
                     ui.separator();
-                    ui.label(format!("Status: {}", self.editor.status));
+                    ui.add(egui::Label::new(format!("Status: {}", self.editor.status)).wrap());
                 });
         }
 
@@ -2664,6 +2706,7 @@ impl State {
         self.geometry_inspection_window(&context);
         self.lighting_window(&context);
         self.material_browser_window(&context);
+        self.demos_window(&context);
         #[cfg(not(target_arch = "wasm32"))]
         self.apply_pending_model_materials(&context);
         self.geo_tree_window(&context);
@@ -2693,6 +2736,7 @@ impl State {
                     (2, "Lighting"),
                     (4, "Scene Outliner"),
                     (5, "Materials"),
+                    (6, "Demos"),
                 ] {
                     let selected = self.active_side_panel == Some(index);
                     if ui
@@ -2721,386 +2765,14 @@ impl State {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn asset_explorer_window(&mut self, context: &egui::Context) {
-        if !self.explorer_open {
-            return;
-        }
-        let mut open = true;
-        let mut navigate_to = None;
-        let mut history_move = 0_i32;
-        let mut entries = std::fs::read_dir(&self.explorer_path)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .collect::<Vec<_>>();
-        entries.sort_by_key(|path| {
-            (
-                !path.is_dir(),
-                path.file_name()
-                    .map(|name| name.to_string_lossy().to_ascii_lowercase())
-                    .unwrap_or_default(),
-            )
+        let mut load = None;
+        self.asset_explorer.show_with_library(context, &mut self.explorer_open, |ui| {
+            load = self.user_library.ui(ui);
         });
-        let filter = self.explorer_search.trim().to_ascii_lowercase();
-        let workspace = std::env::current_dir().ok();
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        let mut favorites = Vec::new();
-        if let Some(path) = &home {
-            favorites.push(("⌂", "Home", path.clone()));
-            for (icon, name) in [("▧", "Desktop"), ("▤", "Documents"), ("↓", "Downloads")] {
-                let child = path.join(name);
-                if child.is_dir() {
-                    favorites.push((icon, name, child));
-                }
-            }
-        }
-        if let Some(path) = workspace {
-            favorites.push(("◇", "Workspace", path));
-        }
-        let breadcrumbs = self
-            .explorer_path
-            .ancestors()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|path| {
-                let label = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "/".to_owned());
-                (label, path.to_path_buf())
-            })
-            .collect::<Vec<_>>();
-        let current_title = self
-            .explorer_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Explorer".to_owned());
-        let viewport = context.content_rect();
-        let explorer_layout_width = self
-            .explorer_window_width
-            .clamp(320.0, (viewport.width() - 40.0).max(320.0));
-        let explorer_layout_height = self
-            .explorer_window_height
-            .clamp(240.0, (viewport.height() - 48.0).max(240.0));
-        let explorer_content_width = (explorer_layout_width - 18.0).max(302.0);
-        let explorer_main_width = (explorer_content_width - 116.0).max(180.0);
-        let window_response = egui::Window::new(format!("{current_title} — Explorer"))
-            .id(egui::Id::new(
-                "independent_asset_explorer_finder_bounded_v8",
-            ))
-            .open(&mut open)
-            .default_pos(egui::pos2(24.0, 24.0))
-            .fixed_size(egui::vec2(explorer_layout_width, explorer_layout_height))
-            .constrain(true)
-            .show(context, |ui| {
-                // Prevent long paths and filenames from feeding an unbounded
-                // desired width back into egui's resizable parent window.
-                // The available width still grows normally when the user
-                // drags the resize handle.
-                ui.set_width(explorer_content_width);
-                ui.set_max_width(explorer_content_width);
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(self.explorer_history_index > 0, egui::Button::new("‹"))
-                        .on_hover_text("Back")
-                        .clicked()
-                    {
-                        history_move = -1;
-                    }
-                    if ui
-                        .add_enabled(
-                            self.explorer_history_index + 1 < self.explorer_history.len(),
-                            egui::Button::new("›"),
-                        )
-                        .on_hover_text("Forward")
-                        .clicked()
-                    {
-                        history_move = 1;
-                    }
-                    if ui.button("↑").on_hover_text("Parent folder").clicked()
-                        && let Some(parent) = self.explorer_path.parent()
-                    {
-                        navigate_to = Some(parent.to_path_buf());
-                    }
-                    ui.separator();
-                    for (index, (label, path)) in breadcrumbs.iter().enumerate() {
-                        if index > 0 {
-                            ui.weak("›");
-                        }
-                        let short_label = if label.chars().count() > 16 {
-                            format!("{}…", label.chars().take(15).collect::<String>())
-                        } else {
-                            label.clone()
-                        };
-                        if ui
-                            .small_button(short_label)
-                            .on_hover_text(path.display().to_string())
-                            .clicked()
-                        {
-                            navigate_to = Some(path.clone());
-                        }
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.selectable_value(&mut self.explorer_icon_view, false, "☷")
-                            .on_hover_text("List view");
-                        ui.selectable_value(&mut self.explorer_icon_view, true, "▦")
-                            .on_hover_text("Icon view");
-                    });
-                });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(104.0, ui.available_height()),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            ui.weak("Favorites");
-                            for (icon, name, path) in &favorites {
-                                if ui
-                                    .selectable_label(
-                                        self.explorer_path == *path,
-                                        format!("{icon}  {name}"),
-                                    )
-                                    .clicked()
-                                {
-                                    navigate_to = Some(path.clone());
-                                }
-                            }
-                            ui.add_space(8.0);
-                            ui.weak("Location");
-                            ui.add(
-                                egui::Label::new(self.explorer_path.display().to_string()).wrap(),
-                            );
-                        },
-                    );
-                    ui.separator();
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(explorer_main_width, ui.available_height()),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            ui.horizontal(|ui| {
-                                ui.add_sized(
-                                    [ui.available_width().min(320.0), 26.0],
-                                    egui::TextEdit::singleline(&mut self.explorer_search)
-                                        .hint_text("Search"),
-                                );
-                                ui.weak(format!("{} items", entries.len()));
-                            });
-                            ui.separator();
-                            egui::ScrollArea::vertical()
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    ui.set_width(explorer_main_width);
-                                    ui.set_max_width(explorer_main_width);
-                                    let selected_path = self.explorer_selected.clone();
-                                    let draw_entry =
-                                        |ui: &mut egui::Ui,
-                                         path: &std::path::PathBuf,
-                                         compact: bool|
-                                         -> egui::Response {
-                                            let name = path
-                                                .file_name()
-                                                .map(|name| name.to_string_lossy().into_owned())
-                                                .unwrap_or_else(|| path.display().to_string());
-                                            let extension = path
-                                                .extension()
-                                                .and_then(|extension| extension.to_str())
-                                                .unwrap_or("")
-                                                .to_ascii_lowercase();
-                                            let icon = if path.is_dir() {
-                                                "📁"
-                                            } else {
-                                                match extension.as_str() {
-                                                    "png" | "jpg" | "jpeg" | "tga" | "bmp"
-                                                    | "exr" | "hdr" => "▧",
-                                                    "obj" | "fbx" => "△",
-                                                    "mtl" => "M",
-                                                    "fx" => "FX",
-                                                    _ => "▤",
-                                                }
-                                            };
-                                            if compact {
-                                                let row_width =
-                                                    (ui.available_width() - 72.0).max(88.0);
-                                                let short_name = if name.chars().count() > 34 {
-                                                    format!(
-                                                        "{}…",
-                                                        name.chars().take(33).collect::<String>()
-                                                    )
-                                                } else {
-                                                    name
-                                                };
-                                                ui.add_sized(
-                                                    [row_width, 22.0],
-                                                    egui::Button::new(format!(
-                                                        "{icon}   {short_name}"
-                                                    ))
-                                                    .selected(selected_path.as_ref() == Some(path)),
-                                                )
-                                            } else {
-                                                ui.vertical_centered(|ui| {
-                                                    ui.label(egui::RichText::new(icon).size(34.0));
-                                                    ui.add_sized(
-                                                        [94.0, 22.0],
-                                                        egui::Button::new(name).selected(
-                                                            selected_path.as_ref() == Some(path),
-                                                        ),
-                                                    )
-                                                })
-                                                .response
-                                            }
-                                        };
-                                    if self.explorer_icon_view {
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.spacing_mut().item_spacing = egui::vec2(10.0, 12.0);
-                                            for path in &entries {
-                                                let name = path
-                                                    .file_name()
-                                                    .map(|name| {
-                                                        name.to_string_lossy().to_ascii_lowercase()
-                                                    })
-                                                    .unwrap_or_default();
-                                                if !filter.is_empty() && !name.contains(&filter) {
-                                                    continue;
-                                                }
-                                                let response = if path.is_dir() {
-                                                    draw_entry(ui, path, false)
-                                                } else {
-                                                    ui.dnd_drag_source(
-                                                        egui::Id::new(("finder_asset", path)),
-                                                        path.clone(),
-                                                        |ui| draw_entry(ui, path, false),
-                                                    )
-                                                    .response
-                                                };
-                                                if response.clicked() {
-                                                    self.explorer_selected = Some(path.clone());
-                                                }
-                                                if response.double_clicked() && path.is_dir() {
-                                                    navigate_to = Some(path.clone());
-                                                }
-                                            }
-                                        });
-                                    } else {
-                                        ui.horizontal(|ui| {
-                                            ui.strong("Name");
-                                            ui.with_layout(
-                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    ui.strong("Size");
-                                                },
-                                            );
-                                        });
-                                        ui.separator();
-                                        for path in &entries {
-                                            let name = path
-                                                .file_name()
-                                                .map(|name| {
-                                                    name.to_string_lossy().to_ascii_lowercase()
-                                                })
-                                                .unwrap_or_default();
-                                            if !filter.is_empty() && !name.contains(&filter) {
-                                                continue;
-                                            }
-                                            ui.horizontal(|ui| {
-                                                let response = if path.is_dir() {
-                                                    draw_entry(ui, path, true)
-                                                } else {
-                                                    ui.dnd_drag_source(
-                                                        egui::Id::new(("finder_asset_list", path)),
-                                                        path.clone(),
-                                                        |ui| draw_entry(ui, path, true),
-                                                    )
-                                                    .response
-                                                };
-                                                if response.clicked() {
-                                                    self.explorer_selected = Some(path.clone());
-                                                }
-                                                if response.double_clicked() && path.is_dir() {
-                                                    navigate_to = Some(path.clone());
-                                                }
-                                                ui.with_layout(
-                                                    egui::Layout::right_to_left(
-                                                        egui::Align::Center,
-                                                    ),
-                                                    |ui| {
-                                                        let size = path
-                                                            .metadata()
-                                                            .ok()
-                                                            .filter(|metadata| metadata.is_file())
-                                                            .map(|metadata| metadata.len());
-                                                        ui.weak(
-                                                            size.map(|bytes| {
-                                                                format!(
-                                                                    "{:.1} MB",
-                                                                    bytes as f64 / 1_048_576.0
-                                                                )
-                                                            })
-                                                            .unwrap_or_default(),
-                                                        );
-                                                    },
-                                                );
-                                            });
-                                        }
-                                    }
-                                });
-                        },
-                    );
-                });
-            });
-        if let Some(response) = window_response {
-            self.explorer_window_rect = Some(response.response.rect);
-            let handle_position = response.response.rect.right_bottom() - egui::vec2(18.0, 18.0);
-            egui::Area::new(egui::Id::new("explorer_manual_resize_handle"))
-                .fixed_pos(handle_position)
-                .order(egui::Order::Foreground)
-                .show(context, |ui| {
-                    let (rect, handle) =
-                        ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::drag());
-                    let stroke =
-                        egui::Stroke::new(1.2, ui.visuals().widgets.inactive.fg_stroke.color);
-                    for offset in [5.0, 9.0, 13.0] {
-                        ui.painter().line_segment(
-                            [
-                                egui::pos2(rect.right() - offset, rect.bottom()),
-                                egui::pos2(rect.right(), rect.bottom() - offset),
-                            ],
-                            stroke,
-                        );
-                    }
-                    if handle.dragged() {
-                        let delta = ui.ctx().input(|input| input.pointer.delta());
-                        self.explorer_window_width = (self.explorer_window_width + delta.x)
-                            .clamp(320.0, (viewport.width() - 40.0).max(320.0));
-                        self.explorer_window_height = (self.explorer_window_height + delta.y)
-                            .clamp(240.0, (viewport.height() - 48.0).max(240.0));
-                    }
-                });
-        }
-        if history_move != 0 {
-            self.explorer_history_index = if history_move < 0 {
-                self.explorer_history_index.saturating_sub(1)
-            } else {
-                (self.explorer_history_index + 1).min(self.explorer_history.len().saturating_sub(1))
-            };
-            if let Some(path) = self.explorer_history.get(self.explorer_history_index) {
-                self.explorer_path = path.clone();
-            }
-            self.explorer_search.clear();
-            self.explorer_selected = None;
-        } else if let Some(path) = navigate_to {
-            self.explorer_path = path;
-            self.explorer_search.clear();
-            self.explorer_selected = None;
-            self.explorer_history
-                .truncate(self.explorer_history_index + 1);
-            if self.explorer_history.last() != Some(&self.explorer_path) {
-                self.explorer_history.push(self.explorer_path.clone());
-            }
-            self.explorer_history_index = self.explorer_history.len().saturating_sub(1);
-        }
-        self.explorer_open = open;
+        self.preferences.explorer_grid = self.asset_explorer.grid;
+        self.preferences.explorer_hidden = self.asset_explorer.show_hidden;
+        self.preferences.explorer_library = self.asset_explorer.user_library;
+        if let Some(id) = load { self.add_user_material_to_scene(&id); }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -3246,8 +2918,9 @@ impl State {
     }
 
     fn generated_target_id(target: usize) -> Option<u64> {
-        (target >= GENERATED_SHAPE_LIGHT_TARGET_BASE)
-            .then_some((target - GENERATED_SHAPE_LIGHT_TARGET_BASE) as u64)
+        target
+            .checked_sub(GENERATED_SHAPE_LIGHT_TARGET_BASE)
+            .map(|scene_id| scene_id as u64)
     }
 
     fn generated_object_count(&self) -> usize {
@@ -3543,8 +3216,35 @@ impl State {
             if !self.ground_plane.roughness_path.is_empty() {
                 ui.small(&self.ground_plane.roughness_path);
             }
+            let emissive_button = ui.button("Load Emissive Map…");
+            let emissive_path = if emissive_button.clicked() {
+                pick_ground_texture()
+            } else {
+                Self::explorer_drop(
+                    &emissive_button,
+                    &["png", "jpg", "jpeg", "tga", "bmp", "exr"],
+                )
+            };
+            if let Some(path) = emissive_path {
+                match self.cached_material_texture(&path, true) {
+                    Ok(texture) => {
+                        self.ground_plane
+                            .material
+                            .set_emissive_texture(&self.device, texture);
+                        self.ground_plane.material.uniform.options[1] = 1.0;
+                        self.ground_plane.emissive_path = path.display().to_string();
+                    }
+                    Err(error) => {
+                        self.editor.status = format!("Ground emissive failed: {error:#}")
+                    }
+                }
+            }
+            if !self.ground_plane.emissive_path.is_empty() {
+                ui.small(&self.ground_plane.emissive_path);
+            }
         }
         ui.separator();
+        material::color_controls(ui, &mut self.ground_plane.material.uniform);
         ui.label("The shape is opaque, depth-tested scene geometry.");
     }
 
@@ -3553,8 +3253,11 @@ impl State {
         base_color_path: String,
         normal_path: String,
         roughness_path: String,
+        emissive_path: String,
     ) -> FxMaterial {
         FxMaterial {
+            color_adjustments: uniform.color_adjustments,
+            emissive_color: uniform.emissive_color,
             base_color: uniform.base_color,
             properties: uniform.properties,
             options: uniform.options,
@@ -3562,11 +3265,13 @@ impl State {
             base_color_path,
             normal_path,
             roughness_path,
+            emissive_path,
         }
     }
 
     fn capture_fx_project(&self) -> FxProject {
-        let imported_model = (!self.obj_model.meshes.is_empty()).then(|| FxImportedModel {
+        let imported_model = (!self.obj_model.meshes.is_empty() || self.obj_model.imported_scene.is_some()).then(|| FxImportedModel {
+            usd_time_code: (!self.editor.usd_use_stage_start).then_some(self.editor.usd_time_code),
             path: self.editor.model_path_input.clone(),
             instances: self
                 .instances
@@ -3588,6 +3293,8 @@ impl State {
                 .keys()
                 .chain(self.geo_normal_paths.keys())
                 .chain(self.geo_roughness_paths.keys())
+                .chain(self.geo_emissive_paths.keys())
+                .chain(self.geo_color_settings.keys())
                 .chain(self.geo_texture_scales.keys())
                 .chain(self.geo_texture_colors.keys())
                 .chain(self.geo_normal_strengths.keys())
@@ -3595,6 +3302,8 @@ impl State {
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .map(|tile| FxGroupTextures {
+                    emissive: self.geo_emissive_paths.get(&tile).cloned().unwrap_or_default(),
+                    colors: self.geo_color_settings.get(&tile).copied(),
                     tile,
                     base_color: self
                         .geo_texture_paths
@@ -3649,10 +3358,12 @@ impl State {
                     object.base_color_path.clone(),
                     object.normal_path.clone(),
                     object.roughness_path.clone(),
+                    object.emissive_path.clone(),
                 ),
             })
             .collect();
         FxProject {
+            deconstruction: self.deconstruction.clone(),
             format: "FX Scene Project".to_owned(),
             version: FX_PROJECT_VERSION,
             imported_model,
@@ -3662,6 +3373,7 @@ impl State {
                 self.editor.base_color_path.clone(),
                 self.editor.normal_path.clone(),
                 self.editor.metallic_roughness_path.clone(),
+                self.editor.emissive_path.clone(),
             ),
             material_graph: self.material_graph.graph.clone(),
             lights: FxLighting {
@@ -3721,6 +3433,7 @@ impl State {
                         entry.base_color_path.clone(),
                         entry.normal_path.clone(),
                         entry.roughness_path.clone(),
+                    entry.emissive_path.clone(),
                     ),
                 })
                 .collect(),
@@ -3806,7 +3519,7 @@ impl State {
                             "FX project loading is unavailable in web builds".to_owned();
                     }
                 }
-                "obj" | "fbx" => {
+                "obj" | "fbx" | "usd" | "usda" | "usdc" | "usdz" => {
                     self.editor.model_path_input = path.display().to_string();
                     self.editor.asset_name = path
                         .file_name()
@@ -3816,10 +3529,6 @@ impl State {
 
                     self.editor.pending_asset = Some(path);
                     self.editor.status = "Model queued for loading".to_owned();
-                }
-
-                "usd" | "usda" | "usdc" => {
-                    self.editor.status = format!("{extension} import is not implemeted");
                 }
 
                 _ => {}
@@ -3860,9 +3569,9 @@ impl State {
         ui.heading("Model Import");
         let path_response = ui.add(
             egui::TextEdit::singleline(&mut self.editor.model_path_input)
-                .hint_text("Type or drop an .obj/.fbx file path"),
+                .hint_text("Type or drop an OBJ, FBX, or USD file path"),
         );
-        if let Some(path) = Self::explorer_drop(&path_response, &["obj", "fbx"]) {
+        if let Some(path) = Self::explorer_drop(&path_response, usd_import::MODEL_EXTENSIONS) {
             self.editor.model_path_input = path.display().to_string();
             self.editor.pending_asset = Some(path);
             self.editor.status = "Model dropped from Explorer".to_owned();
@@ -3873,7 +3582,7 @@ impl State {
             #[cfg(not(target_arch = "wasm32"))]
             if ui.button("Browse…").clicked() {
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("3D Geometry", &["obj", "fbx"])
+                    .add_filter("3D Geometry", usd_import::MODEL_EXTENSIONS)
                     .pick_file()
                 {
                     self.editor.model_path_input = path.display().to_string();
@@ -3883,26 +3592,67 @@ impl State {
             }
             if ui.button("Import").clicked() || enter_pressed {
                 let path = std::path::PathBuf::from(self.editor.model_path_input.trim());
-                if path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| {
-                        extension.eq_ignore_ascii_case("obj")
-                            || extension.eq_ignore_ascii_case("fbx")
-                    })
+                if usd_import::supported_model(&path)
                 {
                     self.editor.pending_asset = Some(path);
                     self.editor.status = "Model queued for loading".to_owned();
                 } else {
                     self.editor.status =
-                        "Model import currently requires an .obj or .fbx file".to_owned();
+                        "Choose an OBJ, FBX, USD, USDA, USDC, or USDZ file".to_owned();
                 }
             }
         });
+        if usd_import::is_usd(std::path::Path::new(self.editor.model_path_input.trim())) {
+            ui.checkbox(&mut self.editor.usd_use_stage_start, "USD: use stage start time");
+            ui.add_enabled_ui(!self.editor.usd_use_stage_start, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("USD time code");
+                    ui.add(egui::DragValue::new(&mut self.editor.usd_time_code).speed(1.0));
+                });
+            });
+            ui.add(egui::Label::new(egui::RichText::new("Import evaluates the composed scene at this time. Reimport to change the snapshot.").small()).wrap());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.pending_model_load.is_some() {
+            ui.horizontal(|ui| { ui.spinner(); ui.label("Loading model…"); });
+        }
         ui.label(format!("Current model: {}", self.editor.asset_name));
+        let mut selected_usd_camera = None;
+        let mut add_usd_lights = false;
+        if let Some(scene) = &self.obj_model.imported_scene {
+            if !scene.lights.is_empty() || !scene.cameras.is_empty() {
+                egui::CollapsingHeader::new("USD cameras & lights").show(ui, |ui| {
+                    if !scene.lights.is_empty() {
+                        add_usd_lights = ui.button(format!("Add {} USD scene lights", scene.lights.len())).clicked();
+                    }
+                    for camera in &scene.cameras {
+                        if ui.button(format!("View {}", camera.name)).clicked() { selected_usd_camera = Some(camera.clone()); }
+                    }
+                });
+            }
+        }
+        if let Some(camera) = selected_usd_camera {
+            self.camera.eye = camera.eye.into(); self.camera.target = camera.target.into(); self.camera.up = camera.up.into();
+            self.camera.fovy = camera.fovy.clamp(1.0, 175.0);
+            self.camera.projection_mode = if camera.orthographic { ProjectionMode::Orthographic } else { ProjectionMode::Perspective };
+            self.camera.ortho_scale = camera.ortho_scale.max(0.001);
+            self.current_view = None;
+            self.editor.status = format!("Viewing USD camera {}", camera.name);
+            self.window.request_redraw();
+        }
+        if add_usd_lights { self.add_imported_usd_lights(); }
+
+        if !self.obj_model.import_warnings.is_empty() {
+            egui::CollapsingHeader::new(format!("Import notes ({})", self.obj_model.import_warnings.len()))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                        for warning in &self.obj_model.import_warnings { ui.add(egui::Label::new(warning).wrap()); }
+                    });
+                });
+        }
         if ui
             .add_enabled(
-                !self.obj_model.meshes.is_empty(),
+                !self.obj_model.meshes.is_empty() || self.obj_model.imported_scene.is_some(),
                 egui::Button::new("Clear Imported Model"),
             )
             .clicked()
@@ -3912,7 +3662,11 @@ impl State {
     }
 
     fn clear_imported_model(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.pending_model_load = None; }
         self.obj_model = model::Model {
+            import_warnings: Vec::new(),
+            imported_scene: None,
             meshes: Vec::new(),
             materials: Vec::new(),
         };
@@ -3929,6 +3683,7 @@ impl State {
         self.editor.base_color_path.clear();
         self.editor.normal_path.clear();
         self.editor.metallic_roughness_path.clear();
+        self.editor.emissive_path.clear();
         self.instance_buffer_dirty = true;
 
         self.show_points = false;
@@ -3945,13 +3700,16 @@ impl State {
         self.geo_texture_paths.clear();
         self.geo_normal_paths.clear();
         self.geo_roughness_paths.clear();
+        self.geo_emissive_paths.clear();
         self.geo_normal_textures.clear();
         self.geo_roughness_textures.clear();
+        self.geo_emissive_textures.clear();
         self.geo_material_bind_groups.clear();
         self.geo_material_uniform_buffers.clear();
         self.geo_texture_scales.clear();
         self.geo_texture_colors.clear();
         self.geo_normal_strengths.clear();
+        self.geo_color_settings.clear();
         self.mesh_material_assignments.clear();
         self.face_material_assignments.clear();
         #[cfg(not(target_arch = "wasm32"))]
@@ -4144,6 +3902,7 @@ impl State {
         }
 
         ui.checkbox(&mut self.editor.texture_enabled, "Texture enabled");
+        material::color_controls(ui, &mut self.pbr_material.uniform);
 
         #[cfg(not(target_arch = "wasm32"))]
         ui.horizontal_wrapped(|ui| {
@@ -4173,6 +3932,15 @@ impl State {
                 Self::explorer_drop(&roughness, &["png", "jpg", "jpeg", "tga", "bmp", "exr"])
             {
                 self.editor.pending_metallic_roughness = Some(path);
+            }
+            let emissive = ui.button("Emissive…");
+            if emissive.clicked() {
+                self.editor.pending_emissive = pick_material_texture();
+            }
+            if let Some(path) =
+                Self::explorer_drop(&emissive, &["png", "jpg", "jpeg", "tga", "bmp", "exr"])
+            {
+                self.editor.pending_emissive = Some(path);
             }
         });
 
@@ -4332,6 +4100,7 @@ impl State {
                             }
                         });
 
+                        self.group_color_ui(ui, tile, &mut texture_import, &mut texture_reset);
                         ui.label("Roughness Map");
                         ui.horizontal(|ui| {
                             let path_text = self.geo_roughness_paths.entry(tile).or_default();
@@ -4381,8 +4150,81 @@ impl State {
         }
     }
 
+    fn apply_group_colors(&self, tile: (i32, i32), uniform: &mut material::MaterialUniform) {
+        if let Some(colors) = self.geo_color_settings.get(&tile) {
+            uniform.color_adjustments[0] = colors.hue;
+            uniform.color_adjustments[1] = colors.emission_hue;
+            uniform.options[1] = colors.intensity;
+            uniform.emissive_color = colors.tint;
+        }
+        if self.geo_emissive_textures.contains_key(&tile) {
+            uniform.color_adjustments[2] = 1.0;
+        }
+    }
+
+    fn group_color_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        tile: (i32, i32),
+        import: &mut Option<((i32, i32), std::path::PathBuf, GroupTextureKind)>,
+        reset: &mut Option<((i32, i32), GroupTextureKind)>,
+    ) {
+        let mut uniform = self.pbr_material.uniform;
+        self.apply_group_colors(tile, &mut uniform);
+        let before = uniform;
+        material::color_controls(ui, &mut uniform);
+        if uniform != before {
+            self.geo_color_settings.insert(
+                tile,
+                GroupColorSettings {
+                    hue: uniform.color_adjustments[0],
+                    emission_hue: uniform.color_adjustments[1],
+                    intensity: uniform.options[1],
+                    tint: uniform.emissive_color,
+                },
+            );
+            self.rebuild_group_material_bind_group(tile);
+        }
+        ui.horizontal(|ui| {
+            ui.label("Emissive");
+            let path = self.geo_emissive_paths.entry(tile).or_default();
+            let response = ui.add(
+                egui::TextEdit::singleline(path)
+                    .desired_width((ui.available_width() - 108.0).max(60.0))
+                    .hint_text("Emissive texture path"),
+            );
+            if response.lost_focus()
+                && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                && !path.trim().is_empty()
+            {
+                *import = Some((
+                    tile,
+                    std::path::PathBuf::from(path.trim()),
+                    GroupTextureKind::Emissive,
+                ));
+            }
+            if let Some(dropped) = Self::explorer_drop(&response, &["png", "jpg", "jpeg", "exr"]) {
+                *import = Some((tile, dropped, GroupTextureKind::Emissive));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if ui.button("Import…").clicked()
+                && let Some(path) = pick_material_texture()
+            {
+                *import = Some((tile, path, GroupTextureKind::Emissive));
+            }
+            if ui.small_button("Reset").clicked() {
+                *reset = Some((tile, GroupTextureKind::Emissive));
+            }
+        });
+    }
+
     fn reset_group_texture(&mut self, tile: (i32, i32), kind: GroupTextureKind) {
         match kind {
+            GroupTextureKind::Emissive => {
+                self.geo_emissive_textures.remove(&tile);
+                self.geo_emissive_paths.remove(&tile);
+                self.geo_color_settings.entry(tile).or_default().intensity = 0.0;
+            }
             GroupTextureKind::BaseColor => {
                 self.uv_space_textures.remove(&tile);
                 self.geo_texture_paths.remove(&tile);
@@ -4399,6 +4241,8 @@ impl State {
         if self.uv_space_textures.contains_key(&tile)
             || self.geo_normal_textures.contains_key(&tile)
             || self.geo_roughness_textures.contains_key(&tile)
+            || self.geo_emissive_textures.contains_key(&tile)
+            || self.geo_color_settings.contains_key(&tile)
         {
             self.rebuild_group_material_bind_group(tile);
         } else {
@@ -4583,7 +4427,7 @@ impl State {
         tile: (i32, i32),
         path: std::path::PathBuf,
     ) {
-        self.import_group_texture(context, tile, path, GroupTextureKind::BaseColor);
+        self.import_group_texture(context, tile, path, self.uv_import_kind);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -4593,6 +4437,18 @@ impl State {
         tile: (i32, i32),
         path: std::path::PathBuf,
         kind: GroupTextureKind,
+    ) {
+        self.queue_group_texture(context, tile, path, kind, true);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn queue_group_texture(
+        &mut self,
+        context: &egui::Context,
+        tile: (i32, i32),
+        path: std::path::PathBuf,
+        kind: GroupTextureKind,
+        enable_emission: bool,
     ) {
         let max_preview_side = context.input(|input| input.max_texture_side).max(1) as u32;
         let worker_path = path.clone();
@@ -4626,6 +4482,7 @@ impl State {
             tile,
             path,
             kind,
+            enable_emission,
             receiver,
         });
         self.editor.status = "Loading high-resolution texture…".to_owned();
@@ -4661,7 +4518,7 @@ impl State {
                 *pixel = image::Rgba([255, pixel[0], 0, 255]);
             }
         }
-        let srgb = matches!(pending.kind, GroupTextureKind::BaseColor);
+        let srgb = matches!(pending.kind, GroupTextureKind::BaseColor | GroupTextureKind::Emissive);
         let viewport_texture = match texture::Texture::from_rgba8(
             &self.device,
             &self.queue,
@@ -4673,6 +4530,7 @@ impl State {
                 GroupTextureKind::BaseColor => "PBR per-group base color",
                 GroupTextureKind::Normal => "PBR per-group normal",
                 GroupTextureKind::Roughness => "PBR per-group roughness",
+                GroupTextureKind::Emissive => "PBR per-group emission",
             },
         ) {
             Ok(texture) => texture,
@@ -4682,6 +4540,12 @@ impl State {
             }
         };
         match pending.kind {
+            GroupTextureKind::Emissive => {
+                self.geo_emissive_textures.insert(pending.tile, viewport_texture);
+                self.geo_emissive_paths.insert(pending.tile, pending.path.display().to_string());
+                let colors = self.geo_color_settings.entry(pending.tile).or_default();
+                if pending.enable_emission && colors.intensity == 0.0 { colors.intensity = 1.0; }
+            }
             GroupTextureKind::BaseColor => {
                 let preview_rgba = decoded.preview.expect("base color preview must exist");
                 let color_image = egui::ColorImage::from_rgba_unmultiplied(
@@ -4737,6 +4601,7 @@ impl State {
             GroupTextureKind::BaseColor => "base color",
             GroupTextureKind::Normal => "normal",
             GroupTextureKind::Roughness => "roughness",
+            GroupTextureKind::Emissive => "emissive",
         };
         self.editor.status = format!("Applied {kind} texture to UV space {udim}");
     }
@@ -4760,6 +4625,7 @@ impl State {
             .copied()
             .unwrap_or(self.pbr_material.uniform.properties[2])
             .clamp(0.0, 2.0);
+        self.apply_group_colors(tile, &mut uniform);
         let uniform_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -4774,6 +4640,7 @@ impl State {
                 .map(|texture| &texture._viewport_texture),
             self.geo_normal_textures.get(&tile),
             self.geo_roughness_textures.get(&tile),
+            self.geo_emissive_textures.get(&tile),
             &uniform_buffer,
         );
         self.geo_material_uniform_buffers
@@ -4781,12 +4648,108 @@ impl State {
         self.geo_material_bind_groups.insert(tile, bind_group);
     }
 
+    fn add_imported_usd_lights(&mut self) {
+        let Some(scene) = &self.obj_model.imported_scene else { return; };
+        let lights = scene.lights.clone();
+        for source in lights {
+            let name = format!("USD {}", source.name);
+            if self.lighting.lights.iter().any(|light| light.name == name) { continue; }
+            if self.lighting.lights.len() >= self.lighting.max_lights {
+                self.editor.status = format!("Viewport light limit ({}) reached", self.lighting.max_lights);
+                break;
+            }
+            let kind = match source.kind.as_str() {
+                "directional" => lighting::LightKind::Directional,
+                "point" => lighting::LightKind::Point,
+                "spot" => lighting::LightKind::Spot,
+                "rectangle" => lighting::LightKind::Area(lighting::AreaShape::Rectangle),
+                "disk" => lighting::LightKind::Area(lighting::AreaShape::Disk),
+                "tube" => lighting::LightKind::Area(lighting::AreaShape::Tube),
+                "sphere" => lighting::LightKind::Area(lighting::AreaShape::Sphere),
+                "environment" => lighting::LightKind::Environment,
+                _ => continue,
+            };
+            self.lighting.add(kind);
+            if let Some(light) = self.lighting.selected_mut() {
+                light.name = name; light.position = source.position; light.rotation_degrees = source.rotation_degrees;
+                light.color = source.color; light.intensity = source.intensity.max(0.0); light.exposure = source.exposure;
+                light.temperature_kelvin = source.temperature; light.use_temperature = source.use_temperature;
+                light.radius = source.radius.max(0.001); light.size = source.size.map(|v| v.max(0.001));
+                light.outer_angle_degrees = source.cone_angle.clamp(0.0, 180.0);
+                light.inner_angle_degrees = light.outer_angle_degrees * (1.0 - source.cone_softness.clamp(0.0, 1.0));
+                light.diffuse_contribution = source.diffuse; light.specular_contribution = source.specular;
+            }
+            if !source.environment_path.is_empty() {
+                self.editor.pending_hdri = Some(source.environment_path.into());
+            }
+        }
+        self.lighting.mode = lighting::ViewportLightingMode::SceneLights;
+        self.lighting.touch();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_imported_pbr_materials(&mut self) {
+        let sources = self.obj_model.materials.clone();
+        let mut assignments = Vec::with_capacity(sources.len());
+        for source in sources {
+            let result = (|| -> anyhow::Result<material_library::SceneMaterial> {
+                let mut material = material::PbrMaterial::new_untextured(&self.device, &self.queue)?;
+                let pbr = source.pbr.as_ref().context("Missing imported PBR parameters")?;
+                material.uniform.base_color = [source.diffuse[0], source.diffuse[1], source.diffuse[2], pbr.opacity.clamp(0.0, 1.0)];
+                material.uniform.properties[0] = pbr.metallic.clamp(0.0, 1.0);
+                material.uniform.properties[1] = pbr.roughness.clamp(0.02, 1.0);
+                material.uniform.emissive_color = [pbr.emissive[0], pbr.emissive[1], pbr.emissive[2], 1.0];
+                material.uniform.options[1] = if pbr.emissive.iter().any(|value| *value > 0.0) { 1.0 } else { 0.0 };
+                for (path, kind) in [(&source.diffuse_texture, GroupTextureKind::BaseColor), (&source.normal_texture, GroupTextureKind::Normal), (&source.roughness_texture, GroupTextureKind::Roughness), (&source.emissive_texture, GroupTextureKind::Emissive)] {
+                    if path.is_empty() { continue; }
+                    let texture = self.cached_material_texture(std::path::Path::new(path), matches!(kind, GroupTextureKind::BaseColor | GroupTextureKind::Emissive))?;
+                    match kind {
+                        GroupTextureKind::BaseColor => material.set_base_color_texture(&self.device, texture),
+                        GroupTextureKind::Normal => material.set_normal_texture(&self.device, texture),
+                        GroupTextureKind::Roughness => material.set_metallic_roughness_texture(&self.device, texture),
+                        GroupTextureKind::Emissive => material.set_emissive_texture(&self.device, texture),
+                    }
+                }
+                // USD emission without a texture is an independent radiance color.
+                if source.emissive_texture.is_empty() && material.uniform.options[1] > 0.0 {
+                    material.uniform.color_adjustments[2] = 1.0; // neutral white emission binding
+                }
+                material.upload(&self.queue);
+                Ok(material_library::SceneMaterial {
+                    id: material_library::MaterialId(self.next_material_id), name: source.name,
+                    material, base_color_path: source.diffuse_texture, normal_path: source.normal_texture,
+                    roughness_path: source.roughness_texture, emissive_path: source.emissive_texture,
+                })
+            })();
+            match result {
+                Ok(entry) => {
+                    assignments.push(entry.id);
+                    self.next_material_id += 1;
+                    self.material_library.push(entry);
+                }
+                Err(error) => {
+                    assignments.push(material_library::MaterialId(0));
+                    self.obj_model.import_warnings.push(format!("Material import failed: {error:#}"));
+                }
+            }
+        }
+        for (index, mesh) in self.obj_model.meshes.iter().enumerate() {
+            self.mesh_material_assignments[index] = assignments.get(mesh.material).copied().unwrap_or(material_library::MaterialId(0));
+        }
+        if let Some(first) = assignments.first() { self.selected_library_material = *first; }
+        self.editor.status = format!("Imported USD: {} mesh groups, {} materials, {} notes", self.obj_model.meshes.len(), assignments.len(), self.obj_model.import_warnings.len());
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn apply_pending_model_materials(&mut self, context: &egui::Context) {
         let Some(root) = self.pending_model_material_root.take() else {
             return;
         };
-        for source in &self.obj_model.materials {
+        if self.obj_model.materials.iter().any(|material| material.pbr.is_some()) {
+            self.apply_imported_pbr_materials();
+            return;
+        }
+        for source in &self.obj_model.materials.clone() {
             if self
                 .material_library
                 .iter()
@@ -4816,6 +4779,17 @@ impl State {
             entry.roughness_path = (!source.roughness_texture.is_empty())
                 .then(|| root.join(&source.roughness_texture).display().to_string())
                 .unwrap_or_default();
+            entry.emissive_path = (!source.emissive_texture.is_empty())
+                .then(|| root.join(&source.emissive_texture).display().to_string()).unwrap_or_default();
+            if !entry.emissive_path.is_empty() {
+                match self.cached_material_texture(std::path::Path::new(&entry.emissive_path), true) {
+                    Ok(texture) => {
+                        entry.material.set_emissive_texture(&self.device, texture);
+                        entry.material.uniform.options[1] = 1.0;
+                    }
+                    Err(error) => self.editor.status = format!("Could not load MTL emission: {error:#}"),
+                }
+            }
             self.material_library.push(entry);
         }
         let solid_colors = self
@@ -4864,6 +4838,13 @@ impl State {
                             tile,
                             root.join(material.roughness_texture),
                             GroupTextureKind::Roughness,
+                        )
+                    }),
+                    (!material.emissive_texture.is_empty()).then(|| {
+                        (
+                            tile,
+                            root.join(material.emissive_texture),
+                            GroupTextureKind::Emissive,
                         )
                     }),
                 ]
@@ -4924,6 +4905,13 @@ impl State {
                     mesh.uv_tile,
                     root.join(texture),
                     GroupTextureKind::Roughness,
+                ));
+            }
+            if let Some(texture) = material.unknown_param.get("map_Ke") {
+                jobs.push((
+                    mesh.uv_tile,
+                    root.join(texture),
+                    GroupTextureKind::Emissive,
                 ));
             }
         }
@@ -5037,6 +5025,8 @@ impl State {
 
         let mut open = self.show_uv_map;
         let mut texture_import_tile = None;
+        let mut texture_import = None;
+        let mut texture_reset = None;
         egui::Window::new("UV Map")
             .id(egui::Id::new("uv_map_window"))
             .open(&mut open)
@@ -5047,6 +5037,21 @@ impl State {
             .resizable(true)
             .constrain(true)
             .show(context, |ui| {
+                egui::ComboBox::from_id_salt("uv_import_kind").selected_text(match self.uv_import_kind {
+                    GroupTextureKind::BaseColor => "Import: Base color", GroupTextureKind::Normal => "Import: Normal",
+                    GroupTextureKind::Roughness => "Import: Roughness", GroupTextureKind::Emissive => "Import: Emissive",
+                }).show_ui(ui, |ui| {
+                    for (kind, name) in [(GroupTextureKind::BaseColor, "Base color"), (GroupTextureKind::Normal, "Normal"), (GroupTextureKind::Roughness, "Roughness"), (GroupTextureKind::Emissive, "Emissive")] {
+                        ui.selectable_value(&mut self.uv_import_kind, kind, name);
+                    }
+                });
+                if let Some((tile, _)) = uv_spaces.get(self.selected_uv_space) {
+                    egui::CollapsingHeader::new("Selected group color & emission").show(ui, |ui| {
+                        self.group_color_ui(ui, *tile, &mut texture_import, &mut texture_reset);
+                    });
+                }
+
+
                 ui.horizontal_wrapped(|ui| {
                     #[cfg(not(target_arch = "wasm32"))]
                     if let Some((tile, (group_name, _))) = uv_spaces.get(self.selected_uv_space) {
@@ -5317,6 +5322,10 @@ impl State {
                 self.import_uv_texture(context, tile, path);
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((tile, path, kind)) = texture_import { self.import_group_texture(context, tile, path, kind); }
+        if let Some((tile, kind)) = texture_reset { self.reset_group_texture(tile, kind); }
+
     }
 
     fn material_browser_window(&mut self, context: &egui::Context) {
@@ -5352,6 +5361,10 @@ impl State {
         let mut assign_faces = false;
         let mut clear_faces = false;
         let mut library_texture_import = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut save_user_material = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut import_new_texture = None;
         egui::Window::new("Material Browser")
             .id(egui::Id::new("material_library_window_scrollable_v3"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-170.0, 12.0))
@@ -5376,6 +5389,7 @@ impl State {
                                     base_color_path: String::new(),
                                     normal_path: String::new(),
                                     roughness_path: String::new(),
+                                    emissive_path: String::new(),
                                 });
                                 self.selected_library_material = id;
                             }
@@ -5383,6 +5397,15 @@ impl State {
                                 self.editor.status =
                                     format!("Could not create material: {error:#}");
                             }
+                        }
+                    }
+                });
+                #[cfg(not(target_arch = "wasm32"))]
+                ui.menu_button("Import Texture as Material…", |ui| {
+                    for (kind, name) in [(GroupTextureKind::BaseColor, "Base Color…"), (GroupTextureKind::Normal, "Normal…"), (GroupTextureKind::Roughness, "Metal / Rough…"), (GroupTextureKind::Emissive, "Emissive…")] {
+                        if ui.button(name).clicked() {
+                            ui.close();
+                            import_new_texture = pick_material_texture().map(|path| (path, kind));
                         }
                     }
                 });
@@ -5464,11 +5487,8 @@ impl State {
                         egui::Slider::new(&mut entry.material.uniform.properties[2], 0.0..=2.0)
                             .text("Normal Strength"),
                     );
-                    ui.add(
-                        egui::Slider::new(&mut entry.material.uniform.options[1], 0.0..=20.0)
-                            .text("Emission"),
-                    );
-                    ui.collapsing("Texture Maps", |ui| {
+                    material::color_controls(ui, &mut entry.material.uniform);
+                    egui::CollapsingHeader::new("Import Texture Maps").default_open(true).show(ui, |ui| {
                         for (label, path, kind) in [
                             (
                                 "Base Color",
@@ -5476,6 +5496,7 @@ impl State {
                                 GroupTextureKind::BaseColor,
                             ),
                             ("Normal", &mut entry.normal_path, GroupTextureKind::Normal),
+                            ("Emissive", &mut entry.emissive_path, GroupTextureKind::Emissive),
                             (
                                 "Metal / Rough",
                                 &mut entry.roughness_path,
@@ -5485,7 +5506,7 @@ impl State {
                             ui.horizontal(|ui| {
                                 ui.label(label);
                                 let response = ui.add(
-                                    egui::TextEdit::singleline(path).hint_text("Texture path"),
+                                    egui::TextEdit::singleline(path).desired_width((ui.available_width() - 58.0).max(60.0)).hint_text("Texture path"),
                                 );
                                 if let Some(dropped) = Self::explorer_drop(
                                     &response,
@@ -5504,7 +5525,7 @@ impl State {
                                     ));
                                 }
                                 #[cfg(not(target_arch = "wasm32"))]
-                                if ui.small_button("…").clicked()
+                                if ui.small_button("Import…").clicked()
                                     && let Some(selected) = pick_material_texture()
                                 {
                                     *path = selected.display().to_string();
@@ -5513,6 +5534,10 @@ impl State {
                             });
                         }
                     });
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if ui.button("Save to User Library").on_hover_text("Save a reusable preset and copy its textures into your personal library").clicked() {
+                        save_user_material = Some(entry.id);
+                    }
                     ui.horizontal(|ui| {
                         if ui.button("Duplicate").clicked() {
                             duplicate = Some(entry.id);
@@ -5523,6 +5548,15 @@ impl State {
                     });
                 }
 
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if ui.button("Open User Library in Explorer").clicked() {
+                        self.explorer_open = true;
+                        self.asset_explorer.user_library = true;
+                        self.preferences.explorer_library = true;
+                    }
+                    if !self.user_library.message.is_empty() { ui.add(egui::Label::new(&self.user_library.message).wrap()); }
+                }
                 ui.separator();
                 ui.heading("Assignments");
                 let released = ui.input(|input| input.pointer.any_released());
@@ -5670,7 +5704,7 @@ impl State {
         if let Some((id, path, kind)) = library_texture_import
             && !path.as_os_str().is_empty()
         {
-            let srgb = kind == GroupTextureKind::BaseColor;
+            let srgb = matches!(kind, GroupTextureKind::BaseColor | GroupTextureKind::Emissive);
             match self.cached_material_texture(&path, srgb) {
                 Ok(texture) => {
                     if let Some(entry) = self
@@ -5679,6 +5713,11 @@ impl State {
                         .find(|entry| entry.id == id)
                     {
                         match kind {
+                            GroupTextureKind::Emissive => {
+                                entry.material.set_emissive_texture(&self.device, texture);
+                                entry.material.uniform.options[1] = 1.0;
+                                entry.emissive_path = path.display().to_string();
+                            }
                             GroupTextureKind::BaseColor => {
                                 entry.material.set_base_color_texture(&self.device, texture);
                                 entry.base_color_path = path.display().to_string();
@@ -5701,6 +5740,10 @@ impl State {
                 }
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(id) = save_user_material { self.save_user_material(id); }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((path, kind)) = import_new_texture { self.import_texture_as_material(&path, kind); }
     }
 
     fn geo_tree_window(&mut self, context: &egui::Context) {
@@ -6074,6 +6117,7 @@ impl State {
                                     texture_reset = Some((tile, GroupTextureKind::Normal));
                                 }
                             });
+                            self.group_color_ui(ui, tile, &mut texture_import, &mut texture_reset);
                             ui.horizontal(|ui| {
                                 ui.label("Roughness");
                                 let path_text = self.geo_roughness_paths.entry(tile).or_default();
@@ -6175,6 +6219,7 @@ impl State {
     }
 
     fn viewport_settings_contents(&mut self, ui: &mut egui::Ui) {
+        ui.small("Changes are saved automatically and kept across launches.");
         ui.heading("Background");
         ui.horizontal(|ui| {
             ui.label("Viewport color");
@@ -6286,6 +6331,24 @@ impl State {
                 self.editor.grid_spacing,
                 self.editor.grid_color,
             );
+        }
+        self.capture_user_preferences();
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Reset settings to default:");
+            if ui.button("Reset").clicked() {
+                self.preferences = user_data::Preferences::default();
+                self.apply_user_preferences();
+                #[cfg(not(target_arch = "wasm32"))]
+                self.preference_store.save(&self.preferences, true);
+                self.editor.status = "Settings reset to defaults. User materials are unchanged.".into();
+            }
+        });
+        ui.small("Reset affects preferences only. Your user library and scene materials are kept.");
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(error) = self.preference_store.error.clone() {
+            ui.colored_label(ui.visuals().warn_fg_color, error);
+            if ui.button("Retry saving settings").clicked() { self.preference_store.save(&self.preferences, true); }
         }
     }
 
@@ -6455,6 +6518,22 @@ impl State {
                 }
             }
         }
+        if let Some(path) = self.editor.pending_emissive.take() {
+            match self.cached_material_texture(&path, true) {
+                Ok(texture) => {
+                    if self.pbr_material.uniform.color_adjustments[2] == 0.0 && self.pbr_material.uniform.options[1] == 0.0 {
+                        self.pbr_material.uniform.options[1] = 1.0;
+                    }
+                    self.pbr_material.set_emissive_texture(&self.device, texture);
+                    shared_maps_changed = true;
+                    self.editor.emissive_path = path.display().to_string();
+                    self.editor.status = format!("Loaded emissive: {}", path.display())
+                }
+                Err(error) => {
+                    self.editor.status = format!("Could not load emissive map: {error:#}")
+                }
+            }
+        }
         if shared_maps_changed {
             let tiles = self
                 .geo_material_bind_groups
@@ -6469,18 +6548,46 @@ impl State {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn load_pending_asset(&mut self) {
-        let Some(path) = self.editor.pending_asset.take() else {
+        if let Some(path) = self.editor.pending_asset.take() {
+            let loading_fx_project = self.pending_project.as_ref()
+                .and_then(|project| project.imported_model.as_ref())
+                .is_some_and(|model| std::path::Path::new(&model.path) == path);
+            let time_code = if loading_fx_project {
+                self.pending_project.as_ref().and_then(|project| project.imported_model.as_ref()).and_then(|model| model.usd_time_code)
+            } else {
+                self.pending_project = None;
+                (!self.editor.usd_use_stage_start).then_some(self.editor.usd_time_code)
+            };
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let worker_path = path.clone();
+            std::thread::spawn(move || {
+                let result = resources::prepare_model_from_path(&worker_path, time_code)
+                    .map_err(|error| format!("{error:#}"));
+                let _ = sender.send(result);
+            });
+            self.editor.status = format!("Loading {}…", path.display());
+            self.pending_model_load = Some(PendingModelLoad { path, time_code, loading_fx_project, receiver });
             return;
+        }
+        let Some(pending) = &self.pending_model_load else { return; };
+        let result = match pending.receiver.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => { self.window.request_redraw(); return; }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("Model import worker stopped unexpectedly".into()),
         };
-        let loading_fx_project = self.pending_project.is_some();
-        let loaded_model = match resources::load_model_from_path(&path, &self.device) {
-            Ok(model) if !model.meshes.is_empty() => model,
+        let pending = self.pending_model_load.take().unwrap();
+        let path = pending.path;
+        let loading_fx_project = pending.loading_fx_project;
+        let loaded_model = match result.and_then(|prepared| resources::upload_prepared_model(prepared, &path.to_string_lossy(), &self.device).map_err(|error| format!("{error:#}"))) {
+            Ok(model) if !model.meshes.is_empty() || model.imported_scene.is_some() => model,
             Ok(_) => {
-                self.editor.status = "Imported OBJ contains no meshes".to_owned();
+                self.editor.status = "Imported model contains no surface meshes".to_owned();
+                self.pending_project = None;
                 return;
             }
             Err(error) => {
-                self.editor.status = format!("Could not import model: {error:#}");
+                self.editor.status = format!("Could not import model: {error}");
+                self.pending_project = None;
                 return;
             }
         };
@@ -6506,6 +6613,8 @@ impl State {
             self.editor.hdri_rotation,
         );
         let mut default_editor = editor_ui::EditorUi::default();
+        default_editor.usd_use_stage_start = pending.time_code.is_none();
+        default_editor.usd_time_code = pending.time_code.unwrap_or(0.0);
         default_editor.pending_hdri = lighting_editor_state.0;
         default_editor.hdri_name = lighting_editor_state.1;
         default_editor.hdri_path = lighting_editor_state.2;
@@ -6521,6 +6630,8 @@ impl State {
         default_editor.model_path_input = path.display().to_string();
         default_editor.status = format!("Imported model: {}", path.display());
 
+        self.deconstruction = demos::Deconstruction::default();
+        self.demo_buffers.clear();
         self.obj_model = loaded_model;
         self.mesh_material_assignments =
             vec![material_library::MaterialId(0); self.obj_model.meshes.len()];
@@ -6569,13 +6680,16 @@ impl State {
         self.geo_texture_paths.clear();
         self.geo_normal_paths.clear();
         self.geo_roughness_paths.clear();
+        self.geo_emissive_paths.clear();
         self.geo_normal_textures.clear();
         self.geo_roughness_textures.clear();
+        self.geo_emissive_textures.clear();
         self.geo_material_bind_groups.clear();
         self.geo_material_uniform_buffers.clear();
         self.geo_texture_scales.clear();
         self.geo_texture_colors.clear();
         self.geo_normal_strengths.clear();
+        self.geo_color_settings.clear();
         self.show_uv_texture = true;
         self.show_uv_lines = true;
         self.uv_inspector_mode = UvInspectorMode::Wireframe;
@@ -6595,6 +6709,8 @@ impl State {
             self.editor.grid_spacing,
             self.editor.grid_color,
         );
+        self.apply_user_preferences();
+        self.frame_all_instances();
         self.window.request_redraw();
     }
 
@@ -6608,6 +6724,8 @@ impl State {
 
     fn apply_fx_material_uniform(uniform: &mut material::MaterialUniform, saved: &FxMaterial) {
         uniform.base_color = saved.base_color;
+        uniform.color_adjustments = saved.color_adjustments;
+        uniform.emissive_color = saved.emissive_color;
         uniform.properties = saved.properties;
         uniform.options = saved.options;
         uniform.inspection = saved.inspection;
@@ -6649,6 +6767,8 @@ impl State {
     }
 
     fn apply_pending_fx_project(&mut self, context: &egui::Context) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.pending_model_load.is_some() || self.editor.pending_asset.is_some() { return; }
         let Some(project) = self.pending_project.take() else {
             return;
         };
@@ -6689,6 +6809,14 @@ impl State {
                     {
                         gpu_material.set_metallic_roughness_texture(&self.device, texture);
                     }
+                    if !saved.material.emissive_path.is_empty()
+                        && let Ok(texture) = self.cached_material_texture(
+                            std::path::Path::new(&saved.material.emissive_path),
+                            true,
+                        )
+                    {
+                        gpu_material.set_emissive_texture(&self.device, texture);
+                    }
                 }
                 self.material_library.push(material_library::SceneMaterial {
                     id: material_library::MaterialId(saved.id),
@@ -6697,6 +6825,7 @@ impl State {
                     base_color_path: saved.material.base_color_path.clone(),
                     normal_path: saved.material.normal_path.clone(),
                     roughness_path: saved.material.roughness_path.clone(),
+                    emissive_path: saved.material.emissive_path.clone(),
                 });
             }
             self.next_material_id = self
@@ -6729,7 +6858,7 @@ impl State {
             .collect();
 
         if let Some(imported) = project.imported_model {
-            if !self.obj_model.meshes.is_empty() {
+            if !self.obj_model.meshes.is_empty() || self.obj_model.imported_scene.is_some() {
                 self.instances = imported
                     .instances
                     .into_iter()
@@ -6757,6 +6886,10 @@ impl State {
                     .resize(self.obj_model.meshes.len(), true);
                 #[cfg(not(target_arch = "wasm32"))]
                 for assignment in imported.textures {
+                    if let Some(colors) = assignment.colors {
+                        self.geo_color_settings.insert(assignment.tile, colors);
+                    }
+                    self.rebuild_group_material_bind_group(assignment.tile);
                     self.geo_texture_scales
                         .insert(assignment.tile, assignment.scale.clamp(0.05, 100.0));
                     self.geo_texture_colors
@@ -6767,13 +6900,15 @@ impl State {
                         (assignment.base_color, GroupTextureKind::BaseColor),
                         (assignment.normal, GroupTextureKind::Normal),
                         (assignment.roughness, GroupTextureKind::Roughness),
+                        (assignment.emissive, GroupTextureKind::Emissive),
                     ] {
                         if !path.is_empty() && !path.starts_with("MTL:") {
-                            self.import_group_texture(
+                            self.queue_group_texture(
                                 context,
                                 assignment.tile,
                                 std::path::PathBuf::from(path),
                                 kind,
+                                false,
                             );
                         }
                     }
@@ -6833,6 +6968,15 @@ impl State {
                     object.roughness_path = saved.material.roughness_path.clone();
                 }
             }
+            if !saved.material.emissive_path.is_empty() {
+                let path = std::path::PathBuf::from(&saved.material.emissive_path);
+                if let Ok(texture) = self.cached_material_texture(&path, true) {
+                    object
+                        .material
+                        .set_emissive_texture(&self.device, texture);
+                    object.emissive_path = saved.material.emissive_path.clone();
+                }
+            }
             let mesh_key = (
                 object.kind,
                 object.subdivisions,
@@ -6870,12 +7014,14 @@ impl State {
         self.editor.base_color_path = project.material.base_color_path.clone();
         self.editor.normal_path = project.material.normal_path.clone();
         self.editor.metallic_roughness_path = project.material.roughness_path.clone();
+        self.editor.emissive_path = project.material.emissive_path.clone();
         self.editor.pending_texture = (!project.material.base_color_path.is_empty())
             .then(|| std::path::PathBuf::from(project.material.base_color_path));
         self.editor.pending_normal = (!project.material.normal_path.is_empty())
             .then(|| std::path::PathBuf::from(project.material.normal_path));
         self.editor.pending_metallic_roughness = (!project.material.roughness_path.is_empty())
             .then(|| std::path::PathBuf::from(project.material.roughness_path));
+        self.editor.pending_emissive = (!project.material.emissive_path.is_empty()).then(|| std::path::PathBuf::from(project.material.emissive_path));
 
         self.lighting.restore_project(
             project.lights.mode,
@@ -6955,7 +7101,10 @@ impl State {
             self.environment_lighting_bind_group = bind_group;
             self.editor.hdri_name = None;
         }
+        self.deconstruction = project.deconstruction;
+        self.deconstruction.sanitize();
         self.editor.hdri_image_disabled = project.environment.disabled;
+        self.apply_user_preferences();
         self.undo_stack.clear();
         self.undo_last_snapshot = None;
         self.undo_transaction_active = false;
@@ -6983,7 +7132,11 @@ impl State {
         self.apply_pending_fx_project(&context);
         self.load_pending_hdri();
         self.load_pending_texture();
+        self.update_demo_buffers();
+        self.update_camera_clip_planes();
         let pointer_down = context.input(|input| input.pointer.primary_down());
+        #[cfg(not(target_arch = "wasm32"))]
+        if !pointer_down { self.preference_store.save(&self.preferences, false); }
         self.record_undo_state(pointer_down);
 
         // The gizmo and material widgets mutate render state while this UI frame
@@ -7029,6 +7182,7 @@ impl State {
                 .copied()
                 .unwrap_or(self.pbr_material.uniform.properties[2])
                 .clamp(0.0, 2.0);
+            self.apply_group_colors(*tile, &mut uniform);
             self.queue
                 .write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
         }
@@ -7152,6 +7306,7 @@ impl State {
             &self.obj_model,
             &self.geo_group_enabled,
             &self.instance_buffer,
+            &self.demo_buffers,
             self.editor.visible_instance_count as u32,
             self.generated_objects
                 .iter()
@@ -7237,6 +7392,7 @@ impl State {
             use model::DrawModel;
 
             for (mesh_index, mesh) in self.obj_model.meshes.iter().enumerate() {
+                render_pass.set_vertex_buffer(1, self.demo_buffer(mesh_index).slice(..));
                 if !self
                     .geo_group_enabled
                     .get(mesh_index)
@@ -7306,6 +7462,7 @@ impl State {
                     render_pass.set_pipeline(wireframe_pipeline);
                     render_pass.set_bind_group(0, &self.wireframe_material.bind_group, &[]);
                     for (mesh_index, mesh) in self.obj_model.meshes.iter().enumerate() {
+                        render_pass.set_vertex_buffer(1, self.demo_buffer(mesh_index).slice(..));
                         if !self
                             .geo_group_enabled
                             .get(mesh_index)
@@ -7328,6 +7485,7 @@ impl State {
                 render_pass.set_bind_group(1, &self.point_bind_group, &[]);
                 let stride = std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress;
                 for (mesh_index, mesh) in self.obj_model.meshes.iter().enumerate() {
+                    render_pass.set_vertex_buffer(1, self.demo_buffer(mesh_index).slice(..));
                     if !self
                         .geo_group_enabled
                         .get(mesh_index)
@@ -7344,7 +7502,7 @@ impl State {
                         let start = instance * stride;
                         render_pass.set_vertex_buffer(
                             1,
-                            self.instance_buffer.slice(start..start + stride),
+                            self.demo_buffer(mesh_index).slice(start..start + stride),
                         );
                         render_pass.draw(0..mesh.point_marker_count, 0..1);
                     }
@@ -7356,6 +7514,7 @@ impl State {
                 render_pass.set_bind_group(1, &self.normal_bind_group, &[]);
                 let stride = std::mem::size_of::<InstanceRaw>() as wgpu::BufferAddress;
                 for (mesh_index, mesh) in self.obj_model.meshes.iter().enumerate() {
+                    render_pass.set_vertex_buffer(1, self.demo_buffer(mesh_index).slice(..));
                     if !self
                         .geo_group_enabled
                         .get(mesh_index)
@@ -7383,7 +7542,7 @@ impl State {
                         let start = instance * stride;
                         render_pass.set_vertex_buffer(
                             1,
-                            self.instance_buffer.slice(start..start + stride),
+                            self.demo_buffer(mesh_index).slice(start..start + stride),
                         );
                         render_pass.draw(0..count, 0..1);
                     }
@@ -7537,14 +7696,14 @@ pub struct App {
 #[cfg(not(target_arch = "wasm32"))]
 fn pick_material_texture() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new()
-        .add_filter("Texture image", &["png", "jpg", "jpeg"])
+        .add_filter("Texture image", &["png", "jpg", "jpeg", "hdr", "exr"])
         .pick_file()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn pick_ground_texture() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new()
-        .add_filter("Ground texture", &["png", "jpg", "jpeg", "tif", "tiff"])
+        .add_filter("Texture image", &["png", "jpg", "jpeg", "hdr", "exr"])
         .pick_file()
 }
 
@@ -7803,6 +7962,24 @@ impl ApplicationHandler<State> for App {
 
             _ if response.consumed => {}
 
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::KeyG),
+                        state: ElementState::Pressed,
+                        repeat: false,
+                        ..
+                    },
+                ..
+            } if !state.egui.context.egui_wants_keyboard_input()
+                && !state.houdini_navigation.view_mode_active()
+                && !state.houdini_navigation.control_held
+                && !state.undo_modifier_held =>
+            {
+                state.editor.show_grid = !state.editor.show_grid;
+                state.window.request_redraw();
+            }
+
             // MouseINPUT //
             WindowEvent::MouseInput {
                 state: button_state,
@@ -7887,17 +8064,90 @@ mod fx_project_tests {
     use super::*;
 
     #[test]
+    fn generated_light_targets_decode_without_underflow() {
+        for target in [0, 1, GENERATED_SHAPE_LIGHT_TARGET_BASE - 1] {
+            assert_eq!(State::generated_target_id(target), None);
+        }
+        assert_eq!(
+            State::generated_target_id(GENERATED_SHAPE_LIGHT_TARGET_BASE),
+            Some(0)
+        );
+        assert_eq!(
+            State::generated_target_id(State::generated_target_index(42)),
+            Some(42)
+        );
+        assert_eq!(
+            State::generated_target_id(usize::MAX),
+            Some((usize::MAX - GENERATED_SHAPE_LIGHT_TARGET_BASE) as u64)
+        );
+    }
+
+    #[test]
+    fn old_materials_and_group_assignments_keep_compatible_defaults() {
+        let saved: FxMaterial = serde_json::from_value(serde_json::json!({
+            "base_color": [1.0, 1.0, 1.0, 1.0], "properties": [0.0, 0.5, 1.0, 1.0],
+            "options": [0.0, 2.0, 1.0, 0.0], "inspection": [0.0, 0.0, 0.0, 0.0],
+            "base_color_path": "", "normal_path": "", "roughness_path": ""
+        }))
+        .unwrap();
+        assert_eq!(saved.color_adjustments, [0.0; 4]);
+        assert_eq!(saved.emissive_color, [1.0; 4]);
+        assert_eq!(saved.options[1], 2.0);
+        assert!(saved.emissive_path.is_empty());
+        let group: FxGroupTextures = serde_json::from_value(serde_json::json!({
+            "tile": [0, 0], "base_color": "", "normal": "", "roughness": ""
+        }))
+        .unwrap();
+        assert!(
+            group.colors.is_none(),
+            "Legacy groups inherit the scene color controls"
+        );
+        assert!(group.emissive.is_empty());
+    }
+
+    #[test]
+    fn group_emission_round_trip_keeps_zero_intensity_and_hue() {
+        let group = FxGroupTextures {
+            tile: (2, 0),
+            base_color: String::new(),
+            normal: String::new(),
+            roughness: String::new(),
+            emissive: "emission.png".into(),
+            scale: 1.0,
+            color: [1.0; 4],
+            normal_strength: 1.0,
+            colors: Some(GroupColorSettings {
+                hue: 45.0,
+                emission_hue: -120.0,
+                intensity: 0.0,
+                tint: [0.2, 0.5, 1.0, 1.0],
+            }),
+        };
+        let restored: FxGroupTextures =
+            serde_json::from_str(&serde_json::to_string(&group).unwrap()).unwrap();
+        assert_eq!(restored.emissive, "emission.png");
+        let settings = restored.colors.unwrap();
+        assert_eq!(settings.intensity, 0.0);
+        assert_eq!(settings.hue, 45.0);
+        assert_eq!(settings.emission_hue, -120.0);
+        assert_eq!(settings.tint, [0.2, 0.5, 1.0, 1.0]);
+    }
+
+    #[test]
     fn fx_project_schema_round_trips() {
         let material = FxMaterial {
-            base_color: [0.2, 0.3, 0.4, 1.0],
+            color_adjustments: [30.0, 120.0, 1.0, 0.0],
+            emissive_color: [0.8, 0.2, 0.5, 1.0],            base_color: [0.2, 0.3, 0.4, 1.0],
             properties: [0.1, 0.5, 1.0, 1.0],
             options: [0.0; 4],
             inspection: [0.0; 4],
             base_color_path: "albedo.png".to_owned(),
             normal_path: String::new(),
             roughness_path: String::new(),
+            emissive_path: "emission.png".into(),
         };
         let project = FxProject {
+            deconstruction: demos::Deconstruction::default(),
             format: "FX Scene Project".to_owned(),
             version: FX_PROJECT_VERSION,
             imported_model: None,
@@ -7922,13 +8172,15 @@ mod fx_project_tests {
                 material,
             }],
             material: FxMaterial {
-                base_color: [1.0; 4],
+            color_adjustments: [0.0; 4],
+            emissive_color: [1.0; 4],                base_color: [1.0; 4],
                 properties: [0.0, 0.5, 1.0, 1.0],
                 options: [0.0; 4],
                 inspection: [0.0; 4],
                 base_color_path: String::new(),
                 normal_path: String::new(),
                 roughness_path: String::new(),
+                emissive_path: String::new(),
             },
             material_graph: material_graph::MaterialGraph::default(),
             lights: FxLighting {
@@ -7990,8 +8242,15 @@ mod fx_project_tests {
             restored.generated_objects[0].material.base_color_path,
             "albedo.png"
         );
+        assert_eq!(restored.generated_objects[0].material.emissive_path, "emission.png");
+        assert_eq!(restored.generated_objects[0].material.color_adjustments, [30.0, 120.0, 1.0, 0.0]);
+        assert_eq!(restored.generated_objects[0].material.emissive_color, [0.8, 0.2, 0.5, 1.0]);
         assert!(restored.material_library.is_empty());
         assert!(restored.face_material_assignments.is_empty());
+        let mut legacy = serde_json::to_value(&project).unwrap();
+        legacy.as_object_mut().unwrap().remove("deconstruction");
+        let legacy: FxProject = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.deconstruction, demos::Deconstruction::default());
     }
 }
 

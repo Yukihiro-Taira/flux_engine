@@ -20,10 +20,10 @@ node_modules/
 *.blend
 *.blend1
 *.abc
-*.usd
-*.usda
-*.usdc
-*.usdz
+*.[uU][sS][dD]
+*.[uU][sS][dD][aA]
+*.[uU][sS][dD][cC]
+*.[uU][sS][dD][zZ]
 *.[hH][dD][rR]
 *.[eE][xX][rR]
 *.[rR][aA][tT]
@@ -69,3 +69,8 @@ Desktop.ini
 *.swo
 *~
 *.log
+
+# Isolated OpenUSD runtime and Python test caches
+/.usd-runtime/
+__pycache__/
+*.pyc

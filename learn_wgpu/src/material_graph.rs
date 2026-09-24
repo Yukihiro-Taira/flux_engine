@@ -703,7 +703,7 @@ impl MaterialGraphEditor {
         uniform.properties[0] = 0.0;
         uniform.properties[1] = 0.5;
         uniform.properties[2] = 0.0;
-        uniform.options[1] = 0.0;
+        // Keep the material editor intensity unless the graph explicitly drives emission.
         uniform.options[3] = 0.0;
 
         let Some(output) = self
@@ -894,4 +894,21 @@ fn distance_to_segment(point: egui::Pos2, start: egui::Pos2, end: egui::Pos2) ->
     }
     let t = ((point - start).dot(segment) / length_squared).clamp(0.0, 1.0);
     point.distance(start + segment * t)
+}
+
+#[cfg(test)]
+mod emission_tests {
+    use super::*;
+
+    #[test]
+    fn graph_without_emission_input_keeps_material_color_controls() {
+        let mut uniform: MaterialUniform = bytemuck::Zeroable::zeroed();
+        uniform.options[1] = 3.5;
+        uniform.color_adjustments = [45.0, -90.0, 1.0, 0.0];
+        uniform.emissive_color = [0.2, 0.5, 1.0, 1.0];
+        MaterialGraphEditor::default().apply_to_uniform(&mut uniform);
+        assert_eq!(uniform.options[1], 3.5);
+        assert_eq!(uniform.color_adjustments, [45.0, -90.0, 1.0, 0.0]);
+        assert_eq!(uniform.emissive_color, [0.2, 0.5, 1.0, 1.0]);
+    }
 }

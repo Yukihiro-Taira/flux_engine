@@ -5,6 +5,8 @@ struct CameraUniform {
 
 struct MaterialUniform {
     base_color: vec4<f32>,
+    color_adjustments: vec4<f32>,
+    emissive_color: vec4<f32>,
     properties: vec4<f32>,
     options: vec4<f32>,
     inspection: vec4<f32>,
@@ -18,6 +20,8 @@ struct MaterialUniform {
 @group(0) @binding(3) var normal_sampler: sampler;
 @group(0) @binding(4) var metallic_roughness_texture: texture_2d<f32>;
 @group(0) @binding(5) var metallic_roughness_sampler: sampler;
+@group(0) @binding(7) var emissive_texture: texture_2d<f32>;
+@group(0) @binding(8) var emissive_sampler: sampler;
 @group(0) @binding(6) var<uniform> material: MaterialUniform;
 @group(1) @binding(0) var<uniform> camera: CameraUniform;
 @group(2) @binding(0) var environment_texture: texture_2d<f32>;
@@ -508,7 +512,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     );
     let sampled_base = mix(vec4<f32>(1.0), sampled_texture, vec4<f32>(texture_weight));
     let noise_mix = select(1.0, mix(0.35, 1.0, value_noise(input.uv * material.options.w)), material.options.w > 0.0);
-    let base_color = sampled_base.rgb * material.base_color.rgb * noise_mix;
+    let base_color = rotate_hue(sampled_base.rgb * material.base_color.rgb * noise_mix, material.color_adjustments.x);
     let mr = textureSample(
         metallic_roughness_texture,
         metallic_roughness_sampler,
@@ -575,7 +579,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             * material.properties.w;
     }
 
-    var color = direct + ambient + base_color * material.options.y;
+    let emission_map = textureSample(emissive_texture, emissive_sampler, texture_uv).rgb;
+    let emission_source = select(base_color, emission_map, material.color_adjustments.z > 0.5 && texture_weight > 0.0);
+    let emission = rotate_hue(emission_source * material.emissive_color.rgb, material.color_adjustments.y) * material.options.y;
+    var color = direct + ambient + emission;
     color = aces_fitted(color);
     return vec4<f32>(uv_inspection_overlay(color, input.uv), sampled_base.a * material.base_color.a);
+}
+
+fn rotate_hue(color: vec3<f32>, degrees: f32) -> vec3<f32> {
+    let angle = degrees * 0.01745329252;
+    let axis = vec3<f32>(0.57735026919);
+    return max(color * cos(angle) + cross(axis, color) * sin(angle)
+        + axis * dot(axis, color) * (1.0 - cos(angle)), vec3<f32>(0.0));
 }

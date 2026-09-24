@@ -23,6 +23,9 @@ struct MaterialTextureCache {
 #[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MaterialUniform {
     pub base_color: [f32; 4],
+    // Base hue (degrees), emission hue, emission map enabled, reserved.
+    pub color_adjustments: [f32; 4],
+    pub emissive_color: [f32; 4],
     // metallic, roughness, normal strength, environment strength
     pub properties: [f32; 4],
     // environment rotation radians, emissive strength, use textures, padding
@@ -43,6 +46,7 @@ pub struct PbrMaterial {
     base_color: Arc<Texture>,
     normal: Arc<Texture>,
     metallic_roughness: Arc<Texture>,
+    emissive: Arc<Texture>,
 }
 
 impl PbrMaterial {
@@ -56,6 +60,7 @@ impl PbrMaterial {
         let layout = template.layout.clone();
         let base_color = Arc::clone(&template.base_color);
         let normal = Arc::clone(&template.normal);
+        let emissive = Arc::clone(&template.emissive);
         let metallic_roughness = Arc::clone(&template.metallic_roughness);
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("PBR material instance bind group"),
@@ -67,6 +72,8 @@ impl PbrMaterial {
                 sampler_binding(3, &normal),
                 texture_binding(4, &metallic_roughness),
                 sampler_binding(5, &metallic_roughness),
+                texture_binding(7, &emissive),
+                sampler_binding(8, &emissive),
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: uniform_buffer.as_entire_binding(),
@@ -81,6 +88,7 @@ impl PbrMaterial {
             base_color,
             normal,
             metallic_roughness,
+            emissive,
         }
     }
 
@@ -132,7 +140,18 @@ impl PbrMaterial {
             false,
             "PBR metallic roughness",
         )?);
+        let emissive = Arc::new(Texture::from_rgba8(
+            device,
+            queue,
+            &[255; 4],
+            1,
+            1,
+            true,
+            "Neutral emission",
+        )?);
         let uniform = MaterialUniform {
+            color_adjustments: [0.0; 4],
+            emissive_color: [1.0; 4],
             base_color: [1.0; 4],
             properties: [0.0, 0.5, 1.0, 1.0],
             options: [0.0, 0.0, 1.0, 0.0],
@@ -154,6 +173,8 @@ impl PbrMaterial {
                 sampler_entry(3),
                 texture_entry(4),
                 sampler_entry(5),
+                texture_entry(7),
+                sampler_entry(8),
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -176,6 +197,8 @@ impl PbrMaterial {
                 sampler_binding(3, &normal),
                 texture_binding(4, &metallic_roughness),
                 sampler_binding(5, &metallic_roughness),
+                texture_binding(7, &emissive),
+                sampler_binding(8, &emissive),
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: uniform_buffer.as_entire_binding(),
@@ -190,6 +213,7 @@ impl PbrMaterial {
             base_color,
             normal,
             metallic_roughness,
+            emissive,
         })
     }
 
@@ -203,8 +227,10 @@ impl PbrMaterial {
         base_color: Option<&Texture>,
         normal: Option<&Texture>,
         metallic_roughness: Option<&Texture>,
+        emissive: Option<&Texture>,
         uniform_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
+        let emissive = emissive.unwrap_or(&self.emissive);
         let base_color = base_color.unwrap_or(&self.base_color);
         let normal = normal.unwrap_or(&self.normal);
         let metallic_roughness = metallic_roughness.unwrap_or(&self.metallic_roughness);
@@ -218,6 +244,8 @@ impl PbrMaterial {
                 sampler_binding(3, normal),
                 texture_binding(4, metallic_roughness),
                 sampler_binding(5, metallic_roughness),
+                texture_binding(7, emissive),
+                sampler_binding(8, emissive),
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: uniform_buffer.as_entire_binding(),
@@ -241,6 +269,12 @@ impl PbrMaterial {
         self.rebuild_bind_group(device);
     }
 
+    pub fn set_emissive_texture(&mut self, device: &wgpu::Device, texture: Arc<Texture>) {
+        self.emissive = texture;
+        self.uniform.color_adjustments[2] = 1.0;
+        self.rebuild_bind_group(device);
+    }
+
     fn rebuild_bind_group(&mut self, device: &wgpu::Device) {
         self.bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("PBR material bind group"),
@@ -252,6 +286,8 @@ impl PbrMaterial {
                 sampler_binding(3, &self.normal),
                 texture_binding(4, &self.metallic_roughness),
                 sampler_binding(5, &self.metallic_roughness),
+                texture_binding(7, &self.emissive),
+                sampler_binding(8, &self.emissive),
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: self.uniform_buffer.as_entire_binding(),
@@ -390,4 +426,19 @@ fn sampler_binding<'a>(binding: u32, texture: &'a Texture) -> wgpu::BindGroupEnt
         binding,
         resource: wgpu::BindingResource::Sampler(&texture.sampler),
     }
+}
+
+/// Shared color controls keep all material editors consistent.
+pub fn color_controls(ui: &mut egui::Ui, uniform: &mut MaterialUniform) {
+    ui.add(
+        egui::Slider::new(&mut uniform.color_adjustments[0], -180.0..=180.0).text("Color hue °"),
+    );
+    ui.add(egui::Slider::new(&mut uniform.options[1], 0.0..=20.0).text("Emissive intensity"));
+    ui.horizontal(|ui| {
+        ui.label("Emission tint");
+        ui.color_edit_button_rgb((&mut uniform.emissive_color[..3]).try_into().unwrap());
+    });
+    ui.add(
+        egui::Slider::new(&mut uniform.color_adjustments[1], -180.0..=180.0).text("Emission hue °"),
+    );
 }
