@@ -1054,6 +1054,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux_engine"
+version = "0.1.2"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "bytemuck",
+ "cgmath",
+ "console_error_panic_hook",
+ "console_log",
+ "egui",
+ "egui-wgpu",
+ "egui-winit",
+ "env_logger",
+ "exr",
+ "fs_extra",
+ "glob",
+ "image 0.24.9",
+ "log",
+ "objc2 0.5.2",
+ "pollster 0.3.0",
+ "reqwest",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tobj",
+ "ufbx",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1792,40 +1826,6 @@ dependencies = [
  "euclid",
  "polycool",
  "smallvec",
-]
-
-[[package]]
-name = "learn_wgpu"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bincode",
- "bytemuck",
- "cgmath",
- "console_error_panic_hook",
- "console_log",
- "egui",
- "egui-wgpu",
- "egui-winit",
- "env_logger",
- "exr",
- "fs_extra",
- "glob",
- "image 0.24.9",
- "log",
- "objc2 0.5.2",
- "pollster 0.3.0",
- "reqwest",
- "rfd",
- "serde",
- "serde_json",
- "tobj",
- "ufbx",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "wgpu",
- "winit",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 <div align="center">
 
-# learn_wgpu
+# Flux Engine
 
 ### A real-time 3D viewport and material editor built in Rust.
 
@@ -17,7 +17,7 @@ Import geometry. Shape the lighting. Explore materials.
 
 ---
 
-`learn_wgpu` is an experimental desktop 3D editor for exploring real-time rendering, materials, and lighting. It combines a GPU-rendered viewport with an interactive editor, Houdini-style camera navigation, and a workflow centered on importing your own assets.
+**Flux Engine** is an experimental desktop 3D editor for exploring real-time rendering, materials, and lighting. It combines a GPU-rendered viewport with an interactive editor, Houdini-style camera navigation, and a workflow centered on importing your own assets.
 
 Built with **Rust**, **wgpu**, **WGSL**, **egui**, and **winit**. The project is under active development, and workflows and save formats may change.
 
@@ -251,3 +251,9 @@ Desktop is the focus of these instructions. The code also contains WebAssembly s
 ## Contributing
 
 Bug reports, focused improvements, and rendering experiments are welcome. For bugs, include reproduction steps, your operating system, GPU, and any relevant error output. Share assets only when you have permission to distribute them.
+
+### Project identity
+
+The Rust package and executable are `flux_engine`, currently version `0.1.2`. The window title is **Flux Engine 0.1.2**. Run `cargo run` from the `flux_engine` folder containing `Cargo.toml`.
+
+The existing `learn_wgpu` personal-data directory and `LEARN_WGPU_*` environment variables remain supported unchanged, preserving settings, material libraries, recovery snapshots, and runtime configuration.

@@ -1,4 +1,4 @@
-use learn_wgpu::run;
+use flux_engine::run;
 
 fn main() {
     run().unwrap();
