@@ -161,12 +161,7 @@ impl crate::State {
             .max(self.deconstruction.distance)
             .min(100_000.0);
         let mut frame = false;
-        egui::Window::new("Demos").constrain_to(crate::timeline::workspace_rect(context))
-            .id(egui::Id::new("visual_demos_window"))
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-170.0, 12.0))
-            .default_width(360.0).resizable(true).vscroll(true)
-            .max_height((crate::timeline::workspace_rect(context).height() - 24.0).max(160.0))
-            .show(context, |ui| {
+        crate::workspace_layout::inspector("Demos", context).show(context, |ui| {
                 ui.heading("Visual demos");
                 ui.weak("Presentation presets for your model");
                 ui.separator();

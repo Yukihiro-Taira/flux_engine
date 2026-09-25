@@ -128,15 +128,8 @@ impl AssetExplorer {
         let mut history = None;
         let mut refresh = false;
         let favorites = favorites();
-        let screen = crate::timeline::workspace_rect(context).size();
-        egui::Window::new("Asset Explorer").constrain_to(crate::timeline::workspace_rect(context))
-            .id(egui::Id::new("asset_explorer_polished"))
+        crate::workspace_layout::explorer(context)
             .open(open)
-            .default_pos(egui::pos2(24.0, 40.0))
-            .default_size(egui::vec2(680.0, 500.0))
-            .min_size(egui::vec2(340.0, 260.0))
-            .max_size((screen - egui::vec2(32.0, 64.0)).max(egui::vec2(340.0, 260.0)))
-            .resizable(true)
             .show(context, |ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
                 ui.horizontal(|ui| {
@@ -505,10 +498,10 @@ mod tests {
                     |ui| explorer.show(ui.ctx(), &mut true),
                 );
                 let rect = context
-                    .memory(|m| m.area_rect(egui::Id::new("asset_explorer_polished")))
+                    .memory(|m| m.area_rect(egui::Id::new(("workspace_panel_v1", "Asset Explorer"))))
                     .unwrap();
                 assert!(rect.width() <= 710.0, "grid={grid} window grew: {rect:?}");
-                assert!(rect.height() <= 560.0, "grid={grid} window grew: {rect:?}");
+                assert!(rect.height() <= 900.0 - crate::timeline::HEIGHT, "grid={grid} window grew: {rect:?}");
                 assert!(
                     output.shapes.len() < 600,
                     "offscreen entries should not be painted"
@@ -539,79 +532,23 @@ mod tests {
 #[cfg(test)]
 mod interaction_tests {
     use super::*;
-
-    fn frame(
-        context: &egui::Context,
-        explorer: &mut AssetExplorer,
-        events: Vec<egui::Event>,
-    ) -> egui::Rect {
-        let _ = context.run_ui(
-            egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1200.0, 800.0),
-                )),
-                events,
-                ..Default::default()
-            },
-            |ui| explorer.show(ui.ctx(), &mut true),
-        );
-        context
-            .memory(|m| m.area_rect(egui::Id::new("asset_explorer_polished")))
-            .unwrap()
-    }
-
     #[test]
-    fn native_resize_shrinks_and_expands_without_content_feedback() {
+    fn workspace_resize_keeps_explorer_bounded_and_stable() {
         let context = egui::Context::default();
         let mut explorer = AssetExplorer::default();
-        let mut rect = frame(&context, &mut explorer, vec![]);
-        for _ in 0..3 {
-            rect = frame(&context, &mut explorer, vec![]);
-        }
-        for delta in [egui::vec2(-280.0, -130.0), egui::vec2(350.0, 200.0)] {
-            let start = rect.right_bottom() - egui::vec2(3.0, 3.0);
-            frame(
-                &context,
-                &mut explorer,
-                vec![egui::Event::PointerMoved(start)],
-            );
-            frame(
-                &context,
-                &mut explorer,
-                vec![egui::Event::PointerButton {
-                    pos: start,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: egui::Modifiers::NONE,
-                }],
-            );
-            frame(
-                &context,
-                &mut explorer,
-                vec![egui::Event::PointerMoved(start + delta)],
-            );
-            frame(
-                &context,
-                &mut explorer,
-                vec![egui::Event::PointerButton {
-                    pos: start + delta,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                }],
-            );
-            let resized = frame(&context, &mut explorer, vec![]);
-            assert!(
-                (resized.width() - rect.width() - delta.x).abs() < 20.0,
-                "resize failed: {rect:?} -> {resized:?}"
-            );
-            for _ in 0..10 {
-                let stable = frame(&context, &mut explorer, vec![]);
-                assert!((stable.width() - resized.width()).abs() < 1.0);
-                assert!((stable.height() - resized.height()).abs() < 1.0);
+        explorer.loaded = true;
+        for size in [egui::vec2(1440.0,900.0), egui::vec2(640.0,480.0), egui::vec2(1920.0,1080.0)] {
+            let mut previous: Option<egui::Rect> = None;
+            for frame in 0..12 {
+                let _ = context.run_ui(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO,size)), ..Default::default()
+                }, |ui| explorer.show(ui.ctx(), &mut true));
+                let rect = context.memory(|m| m.area_rect(egui::Id::new(("workspace_panel_v1", "Asset Explorer")))).unwrap();
+                assert!(rect.right() <= size.x && rect.bottom() <= size.y - crate::timeline::HEIGHT,
+                    "Explorer must fit above the playbar: {rect:?}");
+                if frame > 3 { assert_eq!(Some(rect), previous, "content must not resize the panel"); }
+                previous = Some(rect);
             }
-            rect = resized;
         }
     }
 }

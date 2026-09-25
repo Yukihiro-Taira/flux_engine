@@ -644,7 +644,7 @@ mod layout_tests {
                 },
             );
             let rect = context
-                .memory(|m| m.area_rect(egui::Id::new("asset_explorer_polished")))
+                .memory(|m| m.area_rect(egui::Id::new(("workspace_panel_v1", "Asset Explorer"))))
                 .unwrap();
             assert!(
                 rect.width() <= 480.0,

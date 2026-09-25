@@ -119,6 +119,7 @@ impl State {
     pub(crate) fn toggle_part_selection(&mut self) {
         if self.part_selection.active {
             self.part_selection.active = false;
+            if self.active_side_panel == Some(8) { self.active_side_panel = Some(0); }
             self.part_selection.selected = None;
             self.editor.status = "Object selection · T to select model parts".into();
             return;
@@ -145,6 +146,7 @@ impl State {
         }
         self.timeline.pause_for_edit();
         self.part_selection.active = true;
+        self.active_side_panel = Some(8);
         self.editor.status =
             "Part selection · click a group (UV island for a single-group model) · T to exit"
                 .into();
@@ -251,6 +253,7 @@ impl State {
     }
 
     pub(crate) fn part_selection_window(&mut self, context: &egui::Context) {
+        if self.active_side_panel != Some(8) { return; }
         if !self.part_selection.active {
             return;
         }
@@ -258,8 +261,7 @@ impl State {
         let mut assign = false;
         let mut unique = false;
         let mut clear = false;
-        egui::Window::new("Selected Geometry").constrain_to(crate::timeline::workspace_rect(context)).id(egui::Id::new("selected_geometry_material_layer"))
-            .default_pos(egui::pos2(20.0,280.0)).default_width(290.0).show(context,|ui| {
+        crate::workspace_layout::inspector("Selected Geometry", context).show(context,|ui| {
             ui.strong("Part selection active · T to exit");
             if let Some(selected) = &self.part_selection.selected {
                 if let Some(mesh) = self.obj_model.meshes.get(selected.mesh) {

@@ -75,3 +75,108 @@ impl Default for EditorUi {
         }
     }
 }
+
+/// Fixed-height catalog row; its name and thumbnail share one click/drag target.
+pub(crate) fn material_catalog_row(
+    ui: &mut egui::Ui,
+    id: u64,
+    name: &str,
+    selected: bool,
+    preview: Option<egui::TextureId>,
+) -> egui::Response {
+    ui.push_id(id, |ui| {
+        let (rect, mut response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 52.0),
+            egui::Sense::click_and_drag(),
+        );
+        if ui.is_rect_visible(rect) {
+            let fill = if selected {
+                ui.visuals().selection.bg_fill
+            } else if response.hovered() {
+                ui.visuals().widgets.hovered.bg_fill
+            } else {
+                ui.visuals().faint_bg_color
+            };
+            ui.painter().rect_filled(rect, 5.0, fill);
+            let thumbnail =
+                egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0), egui::vec2(44.0, 44.0));
+            if let Some(texture) = preview {
+                ui.painter().image(
+                    texture,
+                    thumbnail,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            } else {
+                ui.painter()
+                    .rect_filled(thumbnail, 4.0, ui.visuals().widgets.inactive.bg_fill);
+            }
+            let label = egui::Rect::from_min_max(
+                rect.min + egui::vec2(58.0, 8.0),
+                rect.max - egui::vec2(8.0, 8.0),
+            );
+            response = response.union(
+                ui.put(
+                    label,
+                    egui::Label::new(name)
+                        .truncate()
+                        .halign(egui::Align::Min)
+                        .sense(egui::Sense::click_and_drag()),
+                ),
+            );
+        }
+        response.on_hover_text(name)
+    })
+    .inner
+}
+
+#[cfg(test)]
+mod material_catalog_tests {
+    use super::*;
+    #[test]
+    fn thumbnail_and_long_name_both_select_without_expanding_the_row() {
+        for x in [24.0, 130.0] {
+            let ctx = egui::Context::default();
+            let name = "Long material name ".repeat(100);
+            let frame = |events| {
+                let mut response = None;
+                let _ = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(420.0, 200.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        response = Some(material_catalog_row(ui, 1, &name, false, None));
+                    },
+                );
+                response.unwrap()
+            };
+            frame(vec![]);
+            let initial = frame(vec![]);
+            assert!(initial.rect.width() <= 420.0);
+            assert_eq!(initial.rect.height(), 52.0);
+            let pos = initial.rect.min + egui::vec2(x, 26.0);
+            frame(vec![egui::Event::PointerMoved(pos)]);
+            frame(vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+            let released = frame(vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+            assert!(
+                released.clicked(),
+                "row should select when clicked at x={x}"
+            );
+        }
+    }
+}

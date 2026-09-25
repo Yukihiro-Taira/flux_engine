@@ -54,6 +54,7 @@ pub struct PbrMaterial {
     pub bind_group: wgpu::BindGroup,
     pub uniform_buffer: wgpu::Buffer,
     pub uniform: MaterialUniform,
+    uploaded_uniform: std::cell::Cell<MaterialUniform>,
     base_color: Arc<Texture>,
     normal: Arc<Texture>,
     metallic_roughness: Arc<Texture>,
@@ -104,6 +105,7 @@ impl PbrMaterial {
             layout,
             bind_group,
             uniform_buffer,
+            uploaded_uniform: std::cell::Cell::new(uniform),
             uniform,
             base_color,
             normal,
@@ -230,6 +232,7 @@ impl PbrMaterial {
             layout,
             bind_group,
             uniform_buffer,
+            uploaded_uniform: std::cell::Cell::new(uniform),
             uniform,
             base_color,
             normal,
@@ -239,7 +242,10 @@ impl PbrMaterial {
     }
 
     pub fn upload(&self, queue: &wgpu::Queue) {
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.uniform));
+        if self.uploaded_uniform.get() != self.uniform {
+            queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.uniform));
+            self.uploaded_uniform.set(self.uniform);
+        }
     }
 
     pub fn bind_group_with_overrides_and_uniform(

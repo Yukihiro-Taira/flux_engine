@@ -66,7 +66,7 @@ pub fn show(
     let mut clicked_view = None;
 
     egui::Area::new(egui::Id::new("navigation_gizmo"))
-        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(12.0, -12.0 - crate::timeline::HEIGHT))
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(crate::workspace_layout::viewport_left(context), -12.0 - crate::workspace_layout::bottom_inset(context)))
         .show(context, |ui| {
             let (rect, _) = ui.allocate_exact_size(egui::vec2(110.0, 110.0), egui::Sense::hover());
 

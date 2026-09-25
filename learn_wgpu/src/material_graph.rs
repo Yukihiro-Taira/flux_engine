@@ -228,10 +228,12 @@ impl MaterialGraphEditor {
             }
         }
 
+        // Leave usable space for the viewport and inspector on short windows.
+        let graph_max = (crate::timeline::workspace_rect(&context).height() - 180.0).clamp(60.0, 760.0);
         egui::Panel::bottom("material_graph_panel")
             .resizable(true)
-            .default_size(460.0)
-            .size_range(300.0..=760.0)
+            .default_size(460.0_f32.min(graph_max))
+            .size_range(160.0_f32.min(graph_max)..=graph_max)
             .show(root_ui, |ui| {
                 let canvas = ui.available_rect_before_wrap();
                 self.canvas_size = [canvas.width(), canvas.height()];

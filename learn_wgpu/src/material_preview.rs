@@ -5,6 +5,22 @@ pub struct MaterialPreview {
 }
 
 impl MaterialPreview {
+    /// Allocate a thumbnail target while reusing the compiled preview pipeline.
+    pub fn new_target(&self, device: &wgpu::Device, renderer: &mut egui_wgpu::Renderer) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Visible material thumbnail"),
+            size: wgpu::Extent3d { width: 128, height: 128, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        let texture_id = renderer.register_native_texture(device, &view, wgpu::FilterMode::Linear);
+        Self { texture_id, view, pipeline: self.pipeline.clone() }
+    }
+
     pub fn new(
         device: &wgpu::Device,
         renderer: &mut egui_wgpu::Renderer,

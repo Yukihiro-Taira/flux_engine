@@ -102,6 +102,12 @@ LEARN_WGPU_USD_BENCHMARK_ASSET="/path/to/model.usdz" cargo test --offline benchm
 
 The benchmark does not include GPU upload or the first rendered frame. Import time depends on geometry, textures, storage, and hardware. Geometry conversion reuses transformed source values, and texture channel conversion uses native lookup tables without reducing mesh detail or changing the texture resolution limit.
 
+## Workspace and materials
+
+The right-hand tabs share one inspector position and size: Object, Geometry Inspection, Lighting, Scene Outliner, Materials, Demos, UV Map, and Settings. Part selection adds a Selected Part tab. Switch tabs to change tools; click the active tab to hide the inspector. Panels stay above the timeline and the open material graph. Explorer docks separately on the left when space permits; narrow windows show one panel at a time.
+
+Materials uses a searchable scrolling catalog and a separate selected-material editor. Only visible thumbnail rows allocate previews; thumbnails share their rendering pipeline. Mesh and face assignments have bounded scrolling lists under **Assignments**. Long names truncate in the catalog and show their full text on hover. Importing maps, saving user presets, duplication, and drag-and-drop assignment remain available.
+
 ## Playback performance
 
 Normal `cargo run` enables optimization while keeping debug information. Use `cargo run --release` for the fastest build; the first optimized build takes longer.
