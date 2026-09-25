@@ -7,6 +7,7 @@ struct MaterialUniform {
     base_color: vec4<f32>,
     color_adjustments: vec4<f32>,
     emissive_color: vec4<f32>,
+    transparency: vec4<f32>,
     properties: vec4<f32>,
     options: vec4<f32>,
     inspection: vec4<f32>,
@@ -476,8 +477,7 @@ fn evaluate_gpu_light(
     ), visibility);
 }
 
-@fragment
-fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+fn shade_surface(input: VertexOutput, front: bool, transparent_pass: bool) -> vec4<f32> {
     let udim_enabled = material.inspection.y > 0.5;
     let texture_scale = select(1.0, max(material.inspection.z, 0.01), material.inspection.z > 0.0);
     let scaled_uv = floor(input.uv) + fract(input.uv) * texture_scale;
@@ -537,7 +537,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     );
     let surface_bitangent = normalize(cross(surface_normal, surface_tangent)) * handedness;
     let tbn = mat3x3<f32>(surface_tangent, surface_bitangent, surface_normal);
-    let normal = normalize(tbn * adjusted_normal);
+    let normal = normalize(tbn * adjusted_normal) * select(-1.0, 1.0, front);
     // The observer vector must change with the camera for physically correct
     // Fresnel and reflection parallax. Environment directions remain in world
     // space, so orbiting never rotates the HDRI or any scene light.
@@ -584,7 +584,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let emission = rotate_hue(emission_source * material.emissive_color.rgb, material.color_adjustments.y) * material.options.y;
     var color = direct + ambient + emission;
     color = aces_fitted(color);
-    return vec4<f32>(uv_inspection_overlay(color, input.uv), sampled_base.a * material.base_color.a);
+    var alpha = material_opacity(sampled_base.a, material.base_color.a, material.transparency);
+    if material.transparency.x == 4.0 {
+        alpha = select(0.0, 1.0, alpha_coverage(alpha, input.clip_position.xy));
+    }
+    if (!front && material.color_adjustments.w < 0.5) || alpha <= 0.0 { discard; }
+    if transparent_pass != (alpha < 1.0) { discard; }
+    return vec4<f32>(uv_inspection_overlay(color, input.uv), alpha);
 }
 
 fn rotate_hue(color: vec3<f32>, degrees: f32) -> vec3<f32> {
@@ -592,4 +598,14 @@ fn rotate_hue(color: vec3<f32>, degrees: f32) -> vec3<f32> {
     let axis = vec3<f32>(0.57735026919);
     return max(color * cos(angle) + cross(axis, color) * sin(angle)
         + axis * dot(axis, color) * (1.0 - cos(angle)), vec3<f32>(0.0));
+}
+
+@fragment
+fn fs_main(input: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return shade_surface(input, front, false);
+}
+
+@fragment
+fn fs_transparent(input: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    return shade_surface(input, front, true);
 }

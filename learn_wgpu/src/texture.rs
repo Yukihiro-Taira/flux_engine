@@ -2,6 +2,7 @@ use anyhow::*;
 use image::GenericImageView;
 
 pub struct Texture {
+    pub has_transparency: bool,
     #[allow(unused)]
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
@@ -90,6 +91,7 @@ impl Texture {
             ..Default::default()
         });
         Ok(Self {
+            has_transparency: rgba.chunks_exact(4).any(|pixel| pixel[3] < 255),
             texture,
             view,
             sampler,
@@ -137,6 +139,7 @@ impl Texture {
         });
 
         Self {
+            has_transparency: false,
             texture,
             view,
             sampler,
@@ -198,6 +201,7 @@ impl Texture {
             ..Default::default()
         });
         Ok(Self {
+            has_transparency: rgba.as_raw().chunks_exact(4).any(|pixel| pixel[3] < 255),
             texture,
             view,
             sampler,

@@ -26,9 +26,10 @@ Built with **Rust**, **wgpu**, **WGSL**, **egui**, and **winit**. The project is
 - **Interactive viewport** — perspective and orthographic views, camera framing, a world-space grid, and navigation and transform gizmos.
 - **Geometry import** — load OBJ, FBX, USD, USDA, USDC, and USDZ files, inspect mesh groups, and work with generated primitives and a ground plane.
 - **Materials and textures** — edit PBR materials, assign materials to meshes and faces, preview results, and experiment with a node-based material graph.
+- **Transparency** — texture alpha, opacity controls, cutout masks, double-sided surfaces, transparent previews, and alpha-aware shadows.
 - **Lighting and environments** — edit scene lights and load HDR or EXR environments with intensity, exposure, and rotation controls.
 - **Visual demos** — create reversible product deconstruction views with equal-distance group separation and repeatable random arrangements.
-- **Geometry inspection** — explore UV layouts, normals, point overlays, and mesh statistics.
+- **Geometry inspection** — explore UV layouts, normals, point overlays, and mesh statistics. Authored UVs retain their scale and placement; overlapping groups use whole-tile offsets without repacking texture islands.
 - **Personal material library** — import textures, save reusable material presets with owned texture copies, and add them to any scene from Explorer.
 - **Persistent preferences** — viewport settings and Explorer view choices survive restarts; restore defaults from Settings without deleting materials.
 - **Project persistence** — save and reopen `.fx` scenes; export and import material graphs as JSON.
@@ -101,7 +102,15 @@ LEARN_WGPU_USD_BENCHMARK_ASSET="/path/to/model.usdz" cargo test --offline benchm
 
 The benchmark does not include GPU upload or the first rendered frame. Import time depends on geometry, textures, storage, and hardware. Geometry conversion reuses transformed source values, and texture channel conversion uses native lookup tables without reducing mesh detail or changing the texture resolution limit.
 
+## Selecting model parts
+
+Select an imported model and press **T** to enter part selection. Click geometry to highlight its group in cyan. A model with one mesh group uses connected UV islands instead; UV seams separate the selectable regions.
+
+The **Selected Geometry** panel applies a material override to that part, creates an independent material for editing, or removes the override. Open the material editor from this panel to import textures and adjust material settings. Overrides persist in project saves and apply to all instances of that model. Press **T** again to return to object selection; material changes stay applied.
+
 ## Controls
+
+Press **T** with an imported model selected to toggle group / UV-island selection and its material override panel.
 
 Press **G** in the viewport to hide or show the grid. This shortcut is inactive while typing in a text field. Grid visibility is saved with `.fx` projects.
 
@@ -121,6 +130,21 @@ While holding **Space** or **Alt**, use:
 - **A** — frame all; **F** or **G** — frame the selection.
 - **H** — return to the home grid view.
 - **Z** — set the tumble pivot from the cursor.
+
+## Transparency
+
+Open **Transparency** in the material controls (Materials, Object, generated primitives, or texture groups):
+
+- **Automatic / Alpha blend** uses base texture alpha and the **Opacity** multiplier. Zero opacity makes the surface invisible.
+- **Opaque** ignores opacity and alpha, useful for images with unwanted alpha channels.
+- **Cutout** uses **Alpha cutoff** for crisp holes in foliage, fences, and decals.
+- **Dithered** uses patterned coverage when overlapping transparent geometry causes sorting artifacts.
+- **Use base texture alpha** can be disabled independently. **Double sided** renders both sides of thin surfaces.
+- **Reset transparency** restores the default controls.
+
+Texture alpha works through the existing texture import workflows. USD imports preserve opacity, opacity thresholds, and double-sided mesh settings; OBJ/MTL imports honor `d`, `Tr`, and grayscale `map_d`; FBX imports retain material opacity and available opacity maps. Separate imported opacity maps are folded into RGBA textures in personal storage. Settings persist in `.fx` scenes, duplicated materials, and the user library. Group controls edit an assigned scene material when one is present.
+
+Transparent surfaces blend after opaque geometry, sorted by group and instance depth. Intersecting surfaces or triangles inside one group can still have sorting artifacts; use Cutout or Dithered where appropriate. Translucent shadows use filtered coverage, and transparency does not simulate glass refraction.
 
 ## Local assets and saves
 

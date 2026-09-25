@@ -127,6 +127,7 @@ impl State {
         };
         let uniform = &entry.material.uniform;
         let material = crate::FxMaterial {
+            transparency: uniform.transparency,
             color_adjustments: uniform.color_adjustments,
             emissive_color: uniform.emissive_color,
             base_color: uniform.base_color,

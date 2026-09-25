@@ -6,7 +6,7 @@ use wgpu::util::DeviceExt;
 use crate::model;
 
 #[cfg(not(target_arch = "wasm32"))]
-const MODEL_CACHE_VERSION: u32 = 5;
+const MODEL_CACHE_VERSION: u32 = 7;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -207,7 +207,8 @@ fn load_fbx_from_path(path: &std::path::Path) -> anyhow::Result<PreparedModel> {
                 continue;
             }
             let node_name: &str = node.element.name.as_ref();
-            mesh.material_id = Some(material_index as usize);
+            mesh.material_id = node.materials.get(material_index as usize)
+                .map(|material| material.element.typed_id as usize);
             let name = if partition_count > 1 {
                 format!("{node_name} · Material {}", material_index + 1)
             } else if node_name.is_empty() {
@@ -223,7 +224,30 @@ fn load_fbx_from_path(path: &std::path::Path) -> anyhow::Result<PreparedModel> {
         bail!("FBX contains no polygon mesh geometry");
     }
     let label = path.to_string_lossy();
-    build_model(imported_models, Vec::new(), &label)
+    let texture_path = |map: &ufbx::MaterialMap| -> String {
+        let Some(texture) = map.texture.as_ref().filter(|_| map.texture_enabled) else { return String::new(); };
+        let absolute: &str = texture.absolute_filename.as_ref();
+        let relative: &str = texture.relative_filename.as_ref();
+        if !absolute.is_empty() && std::path::Path::new(absolute).is_file() { absolute.to_owned() }
+        else if !relative.is_empty() { relative.to_owned() }
+        else { texture.filename.as_ref().to_owned() }
+    };
+    let imported_materials = scene.materials.iter().map(|material| {
+        let base = if material.pbr.base_color.has_value { &material.pbr.base_color } else { &material.fbx.diffuse_color };
+        let opacity = if material.pbr.opacity.has_value { material.pbr.opacity.value_vec4.x }
+            else if material.fbx.transparency_factor.has_value { 1.0 - material.fbx.transparency_factor.value_vec4.x }
+            else { 1.0 };
+        tobj::Material {
+            name: material.element.name.as_ref().to_owned(),
+            diffuse: if base.has_value { [base.value_vec4.x as f32, base.value_vec4.y as f32, base.value_vec4.z as f32] } else { [0.8; 3] },
+            dissolve: (opacity as f32).clamp(0.0, 1.0),
+            diffuse_texture: texture_path(base),
+            dissolve_texture: texture_path(&material.pbr.opacity),
+            normal_texture: texture_path(&material.pbr.normal_map),
+            ..Default::default()
+        }
+    }).collect();
+    build_model(imported_models, imported_materials, &label)
 }
 
 fn build_model(
@@ -243,6 +267,10 @@ fn build_model_with_normals(
         .map(|material| model::MaterialSource {
             name: material.name,
             diffuse: material.diffuse,
+            opacity: material.unknown_param.get("Tr").and_then(|v| v.parse::<f32>().ok()).map_or(material.dissolve, |v| 1.0 - v).clamp(0.0, 1.0),
+            opacity_texture: material.dissolve_texture,
+            alpha_cutoff: None,
+            double_sided: false,
             pbr: None,
             diffuse_texture: material.diffuse_texture,
             normal_texture: material.normal_texture,
@@ -317,6 +345,13 @@ fn build_model_with_normals(
         let has_texture_coordinates = source.texcoords.len() == expected_texcoord_values
             && source.texcoords.iter().all(|value| value.is_finite());
 
+        // Flip the image origin with one affine transform per UV space. In
+        // particular, V=1 must become 0, not jump to the next tile's upper edge.
+        let authored_tiles = authored_uv_tiles_from_mesh(&source);
+        let uv_row = if repack_overlapping_uvs { Some(0) }
+            else if authored_tiles.len() == 1 { authored_tiles.iter().next().map(|tile| tile.1) }
+            else { None };
+
         // OBJ assets are conventionally authored Y-up, while this viewport
         // uses Z-up. A +90 degree rotation around X maps (x, y, z) to
         // (x, -z, y). Apply it to geometry before tangent generation so the
@@ -326,7 +361,10 @@ fn build_model_with_normals(
                 let tex_coords = if has_texture_coordinates {
                     [
                         source.texcoords[i * 2],
-                        flip_uv_v_preserving_tile(source.texcoords[i * 2 + 1]),
+                        uv_row.map_or_else(
+                            || flip_uv_v_preserving_tile(source.texcoords[i * 2 + 1]),
+                            |row| 2.0 * row as f32 + 1.0 - source.texcoords[i * 2 + 1],
+                        ),
                     ]
                 } else {
                     [0.0, 0.0]
@@ -387,6 +425,13 @@ fn build_model_with_normals(
             calculate_normals(&mut vertices, &source.indices);
         }
         calculate_tangents(&mut vertices, &source.indices);
+        if has_texture_coordinates {
+            // UV V was flipped for top-down image storage. Normal-map vectors
+            // still use the authored (bottom-up) tangent space.
+            for vertex in &mut vertices {
+                vertex.tangent[3] = -vertex.tangent[3];
+            }
+        }
 
         let mut bounds_min = [f32::INFINITY; 3];
         let mut bounds_max = [f32::NEG_INFINITY; 3];
@@ -564,12 +609,16 @@ fn remap_group_uvs(vertices: &mut [model::ModelVertex], has_authored_uvs: bool, 
         return;
     }
 
-    let source_uvs = if has_authored_uvs {
-        vertices
-            .iter()
-            .map(|vertex| vertex.tex_coords)
-            .collect::<Vec<_>>()
-    } else {
+    if has_authored_uvs {
+        // Only translate by whole tiles. Fitting to bounds or adding padding
+        // changes the sampled texels and destroys atlas placement and repeats.
+        for vertex in vertices {
+            vertex.tex_coords[0] += tile.0 as f32;
+            vertex.tex_coords[1] += tile.1 as f32;
+        }
+        return;
+    }
+    let source_uvs = {
         // Project along the thinnest bounds axis, exposing the two dimensions
         // with the greatest geometric extent. This gives UV-less OBJ groups a
         // stable, useful inspection map without changing their geometry.
@@ -946,6 +995,58 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires an external USD asset and OpenUSD runtime"]
+    fn external_usd_preserves_authored_uvs_and_material_assignments() {
+        let Some(path) = std::env::var_os("LEARN_WGPU_USD_UV_TEST_ASSET") else {
+            return;
+        };
+        let scene = crate::usd_import::load(std::path::Path::new(&path), None).unwrap();
+        let models: Vec<_> = scene.meshes.iter().map(|mesh| tobj::Model {
+            name: mesh.name.clone(),
+            mesh: tobj::Mesh {
+                positions: mesh.positions.clone(), normals: mesh.normals.clone(),
+                texcoords: mesh.texcoords.clone(), indices: mesh.indices.clone(),
+                material_id: Some(mesh.material), ..Default::default()
+            },
+        }).collect();
+        assert!(authored_uv_spaces_overlap(&models));
+        let prepared = build_model_with_normals(models, Vec::new(), "external.usdz", true).unwrap();
+        let mut count = 0;
+        for (index, (source, mesh)) in scene.meshes.iter().zip(&prepared.meshes).enumerate() {
+            assert_eq!(mesh.material, source.material);
+            assert_eq!(mesh.indices, source.indices);
+            for (uv, vertex) in source.texcoords.chunks_exact(2).zip(&mesh.vertices) {
+                let expected = [uv[0] + (index % 10) as f32, 1.0 - uv[1] + (index / 10) as f32];
+                for axis in 0..2 {
+                    assert!((vertex.tex_coords[axis] - expected[axis]).abs() < 1e-6);
+                }
+                count += 1;
+            }
+        }
+        eprintln!("Verified {count} UVs across {} meshes; material assignments and triangle indices unchanged", prepared.meshes.len());
+    }
+
+    #[test]
+    fn imported_normal_basis_preserves_authored_positive_v() {
+        let models = vec![tobj::Model {
+            name: "normal-basis".into(),
+            mesh: tobj::Mesh {
+                positions: vec![0.,0.,0., 1.,0.,0., 0.,1.,0.],
+                normals: vec![0.,0.,1., 0.,0.,1., 0.,0.,1.],
+                texcoords: vec![0.,0., 1.,0., 0.,1.],
+                indices: vec![0,1,2], ..Default::default()
+            },
+        }];
+        let prepared = build_model_with_normals(models, Vec::new(), "normal.obj", true).unwrap();
+        for vertex in &prepared.meshes[0].vertices {
+            let tangent = [vertex.tangent[0], vertex.tangent[1], vertex.tangent[2]];
+            let bitangent = scale3(cross3(vertex.normal, tangent), vertex.tangent[3]);
+            // Authored +Y becomes world +Z after the editor's axis conversion.
+            assert!(bitangent[2] > 0.999);
+        }
+    }
+
+    #[test]
     fn generates_a_valid_basis_for_meshes_without_normals() {
         let mut vertices = [
             vertex([-1.0, -1.0, 0.0], [0.0, 0.0]),
@@ -1064,29 +1165,37 @@ mod tests {
     }
 
     #[test]
-    fn obj_groups_are_fitted_into_distinct_udim_tiles() {
-        let mut first = [
-            vertex([-1.0, -1.0, 0.0], [-2.0, 4.0]),
-            vertex([1.0, -1.0, 0.0], [3.0, 4.0]),
-            vertex([0.0, 1.0, 0.0], [0.0, 8.0]),
+    fn authored_uvs_keep_atlas_placement_and_repeats() {
+        let original = [
+            vertex([-1.0, -1.0, 0.0], [-2.25, 4.0]),
+            vertex([1.0, -1.0, 0.0], [3.5, 4.0]),
+            vertex([0.0, 1.0, 0.0], [0.0, 8.75]),
         ];
-        let mut second = first;
+        let mut shifted = original;
+        remap_group_uvs(&mut shifted, true, (3, 2));
+        for (before, after) in original.iter().zip(shifted) {
+            assert_eq!(after.tex_coords, [before.tex_coords[0] + 3.0, before.tex_coords[1] + 2.0]);
+        }
+    }
 
-        remap_group_uvs(&mut first, true, (0, 0));
-        remap_group_uvs(&mut second, true, (1, 0));
-
-        assert!(first.iter().all(|vertex| {
-            vertex.tex_coords[0] > 0.0
-                && vertex.tex_coords[0] < 1.0
-                && vertex.tex_coords[1] > 0.0
-                && vertex.tex_coords[1] < 1.0
-        }));
-        assert!(second.iter().all(|vertex| {
-            vertex.tex_coords[0] > 1.0
-                && vertex.tex_coords[0] < 2.0
-                && vertex.tex_coords[1] > 0.0
-                && vertex.tex_coords[1] < 1.0
-        }));
+    #[test]
+    fn overlapping_material_uvs_preserve_edges_and_partial_atlases() {
+        let models = (0..2).map(|index| tobj::Model {
+            name: format!("group{index}"),
+            mesh: tobj::Mesh {
+                positions: vec![0.,0.,0., 1.,0.,0., 0.,1.,0.],
+                texcoords: vec![0.2,0., 0.6,0., 0.2,1.],
+                indices: vec![0,1,2],
+                ..Default::default()
+            },
+        }).collect();
+        let prepared = build_model(models, Vec::new(), "uv-regression.obj").unwrap();
+        for (index, mesh) in prepared.meshes.iter().enumerate() {
+            for (vertex, expected) in mesh.vertices.iter().zip([[0.2,1.], [0.6,1.], [0.2,0.]]) {
+                assert!((vertex.tex_coords[0] - index as f32 - expected[0]).abs() < 1e-6);
+                assert_eq!(vertex.tex_coords[1], expected[1]);
+            }
+        }
     }
 
     #[test]
@@ -1141,6 +1250,17 @@ mod tests {
             material.unknown_param.get("map_Pr").map(String::as_str),
             Some("skin_roughness.png")
         );
+    }
+
+    #[test]
+    fn mtl_opacity_and_opacity_map_survive_preparation() {
+        let mtl = "newmtl Glass\nd 0.25\nmap_d glass-alpha.png\nnewmtl Transmitted\nTr 0.8\n";
+        let (materials, _) = tobj::load_mtl_buf(&mut BufReader::new(mtl.as_bytes())).unwrap();
+        let mesh = tobj::Mesh { positions: vec![0.,0.,0., 1.,0.,0., 0.,1.,0.], indices: vec![0,1,2], ..Default::default() };
+        let prepared = build_model(vec![tobj::Model { name: "Triangle".into(), mesh }], materials, "fixture.obj").unwrap();
+        assert_eq!(prepared.materials[0].opacity, 0.25);
+        assert_eq!(prepared.materials[0].opacity_texture, "glass-alpha.png");
+        assert!((prepared.materials[1].opacity - 0.2).abs() < 1e-6);
     }
 
     fn vertex(position: [f32; 3], tex_coords: [f32; 2]) -> model::ModelVertex {

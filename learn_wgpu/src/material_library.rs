@@ -70,3 +70,89 @@ mod tests {
         );
     }
 }
+
+/// Resolve last-wins overrides at range boundaries, rather than searching every
+/// override for every triangle (UV islands may contain many disjoint ranges).
+pub fn resolved_face_ranges(
+    count: u32,
+    base: Option<MaterialId>,
+    overrides: &[FaceMaterialAssignment],
+) -> Vec<(u32, u32, Option<MaterialId>)> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut events = BTreeMap::<u32, Vec<(usize, bool)>>::new();
+    events.entry(0).or_default();
+    events.entry(count).or_default();
+    for (index, range) in overrides.iter().enumerate() {
+        let start = range.first_face.min(count);
+        let end = range.end_face.min(count);
+        if start < end {
+            events.entry(start).or_default().push((index, true));
+            events.entry(end).or_default().push((index, false));
+        }
+    }
+    let mut active = BTreeSet::new();
+    let mut result: Vec<(u32, u32, Option<MaterialId>)> = Vec::new();
+    let mut previous = 0;
+    for (position, changes) in events {
+        if position > previous {
+            let material = active
+                .last()
+                .map(|&index: &usize| overrides[index].material)
+                .or(base);
+            if let Some(last) = result.last_mut().filter(|last| last.2 == material) {
+                last.1 = position;
+            } else {
+                result.push((previous, position, material));
+            }
+        }
+        for (index, enabled) in changes {
+            if enabled {
+                active.insert(index);
+            } else {
+                active.remove(&index);
+            }
+        }
+        previous = position;
+    }
+    result
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+    #[test]
+    fn boundary_resolution_matches_last_override_wins() {
+        let base = Some(MaterialId(1));
+        let overrides = vec![
+            FaceMaterialAssignment {
+                first_face: 1,
+                end_face: 8,
+                material: MaterialId(2),
+            },
+            FaceMaterialAssignment {
+                first_face: 3,
+                end_face: 5,
+                material: MaterialId(3),
+            },
+            FaceMaterialAssignment {
+                first_face: 7,
+                end_face: 99,
+                material: MaterialId(4),
+            },
+        ];
+        let ranges = resolved_face_ranges(10, base, &overrides);
+        for face in 0..10 {
+            let expected = overrides
+                .iter()
+                .rev()
+                .find(|r| face >= r.first_face && face < r.end_face)
+                .map(|r| r.material)
+                .or(base);
+            assert_eq!(
+                ranges.iter().find(|r| face >= r.0 && face < r.1).unwrap().2,
+                expected
+            );
+        }
+        assert!(resolved_face_ranges(0, base, &overrides).is_empty());
+    }
+}

@@ -436,6 +436,7 @@ mod tests {
 
     fn material() -> crate::FxMaterial {
         crate::FxMaterial {
+            transparency: crate::material::default_transparency(),
             color_adjustments: [0.0; 4],
             emissive_color: [1.0; 4],
             base_color: [0.2, 0.4, 0.6, 1.0],
@@ -466,6 +467,7 @@ mod tests {
         }
         let mut library = UserLibrary::load_at(Ok(root.clone()));
         saved.options[1] = 3.5;
+        saved.transparency = [2.0, 0.4, 0.0, 0.65];
         saved.color_adjustments = [45.0, -90.0, 1.0, 0.0];
         saved.emissive_color = [1.0, 0.2, 0.5, 1.0];
         library.save_material("Paint", saved).unwrap();
@@ -477,6 +479,7 @@ mod tests {
         let preset = reopened.resolve(&id).unwrap();
         assert_eq!(preset.name, "Paint");
         assert_eq!(preset.material.options[1], 3.5);
+        assert_eq!(preset.material.transparency, [2.0, 0.4, 0.0, 0.65]);
         assert_eq!(preset.material.color_adjustments, [45.0, -90.0, 1.0, 0.0]);
         assert_eq!(preset.material.emissive_color, [1.0, 0.2, 0.5, 1.0]);
         assert_eq!(
@@ -612,6 +615,7 @@ mod layout_tests {
             id: "preview".into(),
             name: "A very long reusable material name 世界 ".repeat(20),
             material: crate::FxMaterial {
+            transparency: crate::material::default_transparency(),
                 color_adjustments: [0.0; 4],
                 emissive_color: [1.0; 4],
                 base_color: [1.0; 4],

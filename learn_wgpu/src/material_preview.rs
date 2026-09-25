@@ -29,7 +29,14 @@ impl MaterialPreview {
         let texture_id = renderer.register_native_texture(device, &view, wgpu::FilterMode::Linear);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Material preview shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("material_preview.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("material_alpha.wgsl"),
+                    "\n",
+                    include_str!("material_preview.wgsl")
+                )
+                .into(),
+            ),
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Material preview pipeline layout"),

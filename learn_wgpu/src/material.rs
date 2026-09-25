@@ -23,9 +23,11 @@ struct MaterialTextureCache {
 #[derive(Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct MaterialUniform {
     pub base_color: [f32; 4],
-    // Base hue (degrees), emission hue, emission map enabled, reserved.
+    // Base hue (degrees), emission hue, emission map enabled, double sided.
     pub color_adjustments: [f32; 4],
     pub emissive_color: [f32; 4],
+    // Alpha mode, cutoff, ignore texture alpha, opacity multiplier.
+    pub transparency: [f32; 4],
     // metallic, roughness, normal strength, environment strength
     pub properties: [f32; 4],
     // environment rotation radians, emissive strength, use textures, padding
@@ -36,6 +38,15 @@ pub struct MaterialUniform {
     pub udim: [f32; 4],
     // 128-bit row-major assignment mask for atlas tiles.
     pub udim_mask: [u32; 4],
+}
+
+impl MaterialUniform {
+    pub fn needs_alpha_blend(&self, texture_has_alpha: bool) -> bool {
+        let mode = self.transparency[0] as u32;
+        matches!(mode, 0 | 3)
+            && (self.base_color[3] * self.transparency[3] < 1.0
+                || (self.options[2] > 0.5 && self.transparency[2] < 0.5 && texture_has_alpha))
+    }
 }
 
 pub struct PbrMaterial {
@@ -50,6 +61,15 @@ pub struct PbrMaterial {
 }
 
 impl PbrMaterial {
+    pub fn base_texture_has_alpha(&self) -> bool {
+        self.base_color.has_transparency
+    }
+
+    pub fn needs_alpha_blend(&self) -> bool {
+        self.uniform
+            .needs_alpha_blend(self.base_color.has_transparency)
+    }
+
     pub fn new_instance_from(device: &wgpu::Device, template: &Self) -> Self {
         let uniform = template.uniform;
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -152,6 +172,7 @@ impl PbrMaterial {
         let uniform = MaterialUniform {
             color_adjustments: [0.0; 4],
             emissive_color: [1.0; 4],
+            transparency: default_transparency(),
             base_color: [1.0; 4],
             properties: [0.0, 0.5, 1.0, 1.0],
             options: [0.0, 0.0, 1.0, 0.0],
@@ -428,8 +449,42 @@ fn sampler_binding<'a>(binding: u32, texture: &'a Texture) -> wgpu::BindGroupEnt
     }
 }
 
+pub fn default_transparency() -> [f32; 4] {
+    [0.0, 0.5, 0.0, 1.0]
+}
+
 /// Shared color controls keep all material editors consistent.
-pub fn color_controls(ui: &mut egui::Ui, uniform: &mut MaterialUniform) {
+pub fn color_controls(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    uniform: &mut MaterialUniform,
+) -> egui::Id {
+    ui.push_id(("material_color_controls", id_salt), |ui| {
+    let transparency = ui.collapsing("Transparency", |ui| {
+        let modes = ["Automatic", "Opaque", "Cutout", "Alpha blend", "Dithered"];
+        let mut mode = (uniform.transparency[0] as usize).min(modes.len() - 1);
+        egui::ComboBox::from_id_salt("alpha_mode").selected_text(modes[mode]).show_ui(ui, |ui| {
+            for (index, label) in modes.iter().enumerate() {
+                ui.selectable_value(&mut mode, index, *label);
+            }
+        });
+        uniform.transparency[0] = mode as f32;
+        ui.add_enabled(mode != 1, egui::Slider::new(&mut uniform.transparency[3], 0.0..=1.0).text("Opacity"));
+        let mut texture_alpha = uniform.transparency[2] < 0.5;
+        ui.checkbox(&mut texture_alpha, "Use base texture alpha");
+        uniform.transparency[2] = if texture_alpha { 0.0 } else { 1.0 };
+        if mode == 2 {
+            ui.add(egui::Slider::new(&mut uniform.transparency[1], 0.0..=1.0).text("Alpha cutoff"));
+        }
+        let mut double_sided = uniform.color_adjustments[3] > 0.5;
+        ui.checkbox(&mut double_sided, "Double sided");
+        uniform.color_adjustments[3] = if double_sided { 1.0 } else { 0.0 };
+        if ui.small_button("Reset transparency").clicked() {
+            uniform.transparency = default_transparency();
+            uniform.color_adjustments[3] = 0.0;
+        }
+        ui.add(egui::Label::new(egui::RichText::new("Opacity multiplies material and texture alpha. Cutout suits foliage; dithered avoids overlap sorting artifacts.").small()).wrap());
+    });
     ui.add(
         egui::Slider::new(&mut uniform.color_adjustments[0], -180.0..=180.0).text("Color hue °"),
     );
@@ -441,4 +496,124 @@ pub fn color_controls(ui: &mut egui::Ui, uniform: &mut MaterialUniform) {
     ui.add(
         egui::Slider::new(&mut uniform.color_adjustments[1], -180.0..=180.0).text("Emission hue °"),
     );
+    transparency.header_response.id
+    }).inner
+}
+
+#[cfg(test)]
+mod transparency_tests {
+    #[test]
+    fn repeated_material_editors_have_independent_transparency_state() {
+        let context = egui::Context::default();
+        let mut material: super::MaterialUniform = bytemuck::Zeroable::zeroed();
+        material.transparency = super::default_transparency();
+        let _ = context.run_ui(Default::default(), |ui| {
+            let first = super::color_controls(ui, ("group", 1), &mut material);
+            let second = super::color_controls(ui, ("group", 2), &mut material);
+            assert_ne!(first, second);
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                &context, first, false,
+            );
+            state.set_open(true);
+            state.store(&context);
+            assert!(
+                !egui::collapsing_header::CollapsingState::load_with_default_open(
+                    &context, second, false,
+                )
+                .is_open()
+            );
+        });
+    }
+
+    #[test]
+    fn blend_pass_tracks_material_and_texture_alpha() {
+        let mut uniform: super::MaterialUniform = bytemuck::Zeroable::zeroed();
+        uniform.base_color = [1.0; 4];
+        uniform.options[2] = 1.0;
+        uniform.transparency = super::default_transparency();
+        assert!(!uniform.needs_alpha_blend(false));
+        assert!(uniform.needs_alpha_blend(true));
+        uniform.transparency[2] = 1.0;
+        assert!(!uniform.needs_alpha_blend(true));
+        uniform.transparency[3] = 0.4;
+        assert!(uniform.needs_alpha_blend(false));
+        for mode in [1.0, 2.0, 4.0] {
+            uniform.transparency[0] = mode;
+            assert!(!uniform.needs_alpha_blend(true));
+        }
+        uniform.transparency = super::default_transparency();
+        uniform.options[2] = 0.0;
+        assert!(!uniform.needs_alpha_blend(true));
+        uniform.base_color[3] = 0.0;
+        assert!(uniform.needs_alpha_blend(false));
+    }
+
+    #[test]
+    fn opacity_map_multiplies_existing_alpha_without_changing_rgb() {
+        let mut base =
+            image::RgbaImage::from_raw(2, 1, vec![20, 30, 40, 128, 50, 60, 70, 255]).unwrap();
+        let alpha =
+            image::RgbaImage::from_raw(2, 1, vec![0, 0, 0, 255, 128, 128, 128, 255]).unwrap();
+        super::apply_opacity_map(&mut base, &alpha);
+        assert_eq!(base.into_raw(), vec![20, 30, 40, 0, 50, 60, 70, 128]);
+    }
+
+    #[test]
+    fn all_material_shaders_validate_with_transparency() {
+        for shader in [
+            include_str!("shader.wgsl"),
+            include_str!("material_preview.wgsl"),
+            include_str!("lighting/shadow.wgsl"),
+        ] {
+            let source = format!("{}\n{}", include_str!("material_alpha.wgsl"), shader);
+            let module = wgpu::naga::front::wgsl::parse_str(&source).unwrap();
+            wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap();
+        }
+    }
+}
+
+/// Fold a conventional grayscale opacity map into base alpha so every existing
+/// texture import, library save, and shader uses the same RGBA representation.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn bake_opacity_texture(
+    base: Option<&std::path::Path>,
+    opacity: &std::path::Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let (alpha, width, height) = decode_viewport_rgba(opacity)?;
+    let alpha = image::RgbaImage::from_raw(width, height, alpha).unwrap();
+    let mut base = if let Some(path) = base {
+        let (pixels, w, h) = decode_viewport_rgba(path)?;
+        image::RgbaImage::from_raw(w, h, pixels).unwrap()
+    } else {
+        image::RgbaImage::from_pixel(width, height, image::Rgba([255; 4]))
+    };
+    apply_opacity_map(&mut base, &alpha);
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    base.dimensions().hash(&mut hash);
+    base.as_raw().hash(&mut hash);
+    let root = crate::user_data::data_dir()?.join("material-assets");
+    std::fs::create_dir_all(&root)?;
+    let path = root.join(format!("alpha-{:016x}.png", hash.finish()));
+    if !path.exists() {
+        base.save(&path)?;
+    }
+    Ok(path)
+}
+
+fn apply_opacity_map(base: &mut image::RgbaImage, alpha: &image::RgbaImage) {
+    let alpha = image::imageops::resize(
+        alpha,
+        base.width(),
+        base.height(),
+        image::imageops::FilterType::Triangle,
+    );
+    for (pixel, opacity) in base.pixels_mut().zip(alpha.pixels()) {
+        pixel[3] = ((u16::from(pixel[3]) * u16::from(opacity[0]) + 127) / 255) as u8;
+    }
 }

@@ -34,7 +34,7 @@ pub struct ShadowRenderer {
 }
 
 impl ShadowRenderer {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, material_layout: &wgpu::BindGroupLayout) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Shadow depth array"),
             size: wgpu::Extent3d {
@@ -138,11 +138,18 @@ impl ShadowRenderer {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shadow depth shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shadow.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../material_alpha.wgsl"),
+                    "\n",
+                    include_str!("shadow.wgsl")
+                )
+                .into(),
+            ),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow pipeline layout"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(&layout), Some(material_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -154,9 +161,14 @@ impl ShadowRenderer {
                 buffers: &[model::ModelVertex::desc(), InstanceRaw::desc()],
                 compilation_options: Default::default(),
             },
-            fragment: None,
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_shadow"),
+                targets: &[],
+                compilation_options: Default::default(),
+            }),
             primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -258,14 +270,8 @@ impl ShadowRenderer {
     pub fn render<'a>(
         &'a self,
         encoder: &mut wgpu::CommandEncoder,
-        model: &'a model::Model,
-        group_enabled: &[bool],
-        instance_buffer: &'a wgpu::Buffer,
-        group_instance_buffers: &'a [wgpu::Buffer],
-        instance_count: u32,
-        generated: impl Iterator<Item = &'a crate::ground_plane::GroundPlane>,
+        surfaces: &[model::SurfaceDraw<'a>],
     ) {
-        let generated = generated.collect::<Vec<_>>();
         for layer in 0..self.pass_count {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Shadow depth pass"),
@@ -284,18 +290,8 @@ impl ShadowRenderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[layer * 256]);
-            pass.set_vertex_buffer(1, instance_buffer.slice(..));
-            for (index, mesh) in model.meshes.iter().enumerate() {
-                if !group_enabled.get(index).copied().unwrap_or(true) {
-                    continue;
-                }
-                pass.set_vertex_buffer(1, group_instance_buffers.get(index).unwrap_or(instance_buffer).slice(..));
-                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.num_elements, 0, 0..instance_count);
-            }
-            for object in &generated {
-                object.draw_shadow(&mut pass);
+            for surface in surfaces {
+                surface.draw(&mut pass, 1);
             }
         }
     }

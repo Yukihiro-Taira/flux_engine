@@ -2,6 +2,7 @@ struct MaterialUniform {
     base_color: vec4<f32>,
     color_adjustments: vec4<f32>,
     emissive_color: vec4<f32>,
+    transparency: vec4<f32>,
     properties: vec4<f32>,
     options: vec4<f32>,
     inspection: vec4<f32>,
@@ -48,9 +49,9 @@ fn environment_uv(direction: vec3<f32>) -> vec2<f32> {
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let point = input.uv * 2.0 - 1.0;
     let radius_squared = dot(point, point);
-    if radius_squared > 0.82 {
-        discard;
-    }
+    let checker_cell = vec2<u32>(input.position.xy / 12.0);
+    let checker = vec3<f32>(select(0.10, 0.19, (checker_cell.x + checker_cell.y) % 2u == 0u));
+    if radius_squared > 0.82 { return vec4<f32>(checker, 1.0); }
     let geometric_normal = normalize(vec3<f32>(point.x, -point.y, sqrt(0.82 - radius_squared)));
     let view = vec3<f32>(0.0, 0.0, 1.0);
     let pi = 3.14159265;
@@ -58,7 +59,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         atan2(geometric_normal.y, geometric_normal.x) / (2.0 * pi) + 0.5,
         0.5 - asin(geometric_normal.z) / pi
     );
-    let base = rotate_hue(textureSample(base_texture, base_sampler, sphere_uv).rgb * material.base_color.rgb, material.color_adjustments.x);
+    let sample = textureSample(base_texture, base_sampler, sphere_uv);
+    let sampled_base = mix(vec4<f32>(1.0), sample, vec4<f32>(step(0.5, material.options.z)));
+    let base = rotate_hue(sampled_base.rgb * material.base_color.rgb, material.color_adjustments.x);
     let emission_map = textureSample(emissive_texture, emissive_sampler, sphere_uv).rgb;
     let emission_source = select(base, emission_map, material.color_adjustments.z > 0.5);
     let emission = rotate_hue(emission_source * material.emissive_color.rgb, material.color_adjustments.y) * material.options.y;
@@ -83,7 +86,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         + environment * specular_color * (1.0 - roughness * 0.75)
         + emission;
     color = color / (color + vec3<f32>(1.0));
-    return vec4<f32>(color, 1.0);
+    var alpha = material_opacity(sampled_base.a, material.base_color.a, material.transparency);
+    if material.transparency.x == 4.0 {
+        alpha = select(0.0, 1.0, alpha_coverage(alpha, input.position.xy));
+    }
+    return vec4<f32>(mix(checker, color, alpha), 1.0);
 }
 
 fn rotate_hue(color: vec3<f32>, degrees: f32) -> vec3<f32> {

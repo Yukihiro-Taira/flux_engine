@@ -1,6 +1,28 @@
 use std::ops::Range;
 use wgpu::util::DeviceExt;
 
+/// A surface range with its resolved material, shared by color and shadow passes.
+pub struct SurfaceDraw<'a> {
+    pub vertices: &'a wgpu::Buffer,
+    pub indices: &'a wgpu::Buffer,
+    pub instances: &'a wgpu::Buffer,
+    pub material: &'a wgpu::BindGroup,
+    pub index_range: Range<u32>,
+    pub instance_range: Range<u32>,
+    pub depth: f32,
+    pub blend: bool,
+}
+
+impl<'a> SurfaceDraw<'a> {
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'a>, material_slot: u32) {
+        pass.set_bind_group(material_slot, self.material, &[]);
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.set_vertex_buffer(1, self.instances.slice(..));
+        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(self.index_range.clone(), 0, self.instance_range.clone());
+    }
+}
+
 pub trait Vertex {
     fn desc() -> wgpu::VertexBufferLayout<'static>;
 }
@@ -112,12 +134,24 @@ pub struct Model {
 pub struct MaterialSource {
     pub name: String,
     pub diffuse: [f32; 3],
+    #[serde(default = "default_opacity")]
+    pub opacity: f32,
+    #[serde(default)]
+    pub opacity_texture: String,
+    #[serde(default)]
+    pub alpha_cutoff: Option<f32>,
+    #[serde(default)]
+    pub double_sided: bool,
     pub diffuse_texture: String,
     pub normal_texture: String,
     pub roughness_texture: String,
     pub emissive_texture: String,
     #[serde(default)]
     pub pbr: Option<ImportedPbr>,
+}
+
+fn default_opacity() -> f32 {
+    1.0
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

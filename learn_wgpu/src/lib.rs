@@ -43,6 +43,7 @@ mod material_preview;
 mod model;
 mod navigation_gizmo;
 mod object_gizmo;
+mod part_selection;
 mod resources;
 mod usd_import;
 mod texture;
@@ -442,6 +443,8 @@ struct FxGeneratedObject {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct FxMaterial {
+    #[serde(default = "material::default_transparency")]
+    transparency: [f32; 4],
     #[serde(default)]
     color_adjustments: [f32; 4],
     #[serde(default = "default_texture_color")]
@@ -471,9 +474,11 @@ struct GroupColorSettings {
     emission_hue: f32,
     intensity: f32,
     tint: [f32; 4],
+    transparency: [f32; 4],
+    double_sided: bool,
 }
 impl Default for GroupColorSettings {
-    fn default() -> Self { Self { hue: 0.0, emission_hue: 0.0, intensity: 0.0, tint: [1.0; 4] } }
+    fn default() -> Self { Self { hue: 0.0, emission_hue: 0.0, intensity: 0.0, tint: [1.0; 4], transparency: material::default_transparency(), double_sided: false } }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -566,6 +571,7 @@ pub struct State {
     is_surface_configured: bool,
     window: Arc<Window>,
     render_pipeline: wgpu::RenderPipeline,
+    transparent_pipeline: wgpu::RenderPipeline,
     point_pipeline: wgpu::RenderPipeline,
     point_uniform_buffer: wgpu::Buffer,
     point_bind_group: wgpu::BindGroup,
@@ -645,6 +651,7 @@ pub struct State {
     face_assign_first: u32,
     face_assign_end: u32,
     selected_material_mesh: usize,
+    part_selection: part_selection::PartSelection,
     lighting: lighting::LightingManager,
     shadow_renderer: lighting::shadow::ShadowRenderer,
     lighting_gpu: lighting::LightingGpu,
@@ -1044,7 +1051,7 @@ impl State {
             emissive_path: String::new(),
         }];
         let lighting = lighting::LightingManager::default();
-        let shadow_renderer = lighting::shadow::ShadowRenderer::new(&device);
+        let shadow_renderer = lighting::shadow::ShadowRenderer::new(&device, &pbr_material.layout);
         let lighting_gpu = lighting::LightingGpu::new(&device, &shadow_renderer);
 
         //----------------------------------------//
@@ -1130,7 +1137,7 @@ impl State {
         //----------------------------------------//
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(concat!(include_str!("material_alpha.wgsl"), "\n", include_str!("shader.wgsl")).into()),
         });
 
         let create_model_pipeline =
@@ -1140,10 +1147,10 @@ impl State {
                     layout: Some(&render_pipeline_layout),
                     fragment: Some(wgpu::FragmentState {
                         module: &shader,
-                        entry_point: Some("fs_main"),
+                        entry_point: Some(if label == "Transparent model pipeline" { "fs_transparent" } else { "fs_main" }),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: config.format,
-                            blend: Some(wgpu::BlendState::REPLACE),
+                            blend: Some(if label == "Transparent model pipeline" { wgpu::BlendState::ALPHA_BLENDING } else { wgpu::BlendState::REPLACE }),
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
                         compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -1164,7 +1171,7 @@ impl State {
                         stencil: wgpu::StencilState::default(),
                         // Pull overlays slightly toward the camera so coplanar wire
                         // edges remain visible over the shaded surface.
-                        bias: if depth_write || topology != wgpu::PrimitiveTopology::TriangleList {
+                        bias: if label == "Transparent model pipeline" || depth_write || topology != wgpu::PrimitiveTopology::TriangleList {
                             wgpu::DepthBiasState::default()
                         } else {
                             wgpu::DepthBiasState {
@@ -1195,7 +1202,7 @@ impl State {
             "Solid model pipeline",
             wgpu::PrimitiveTopology::TriangleList,
             wgpu::PolygonMode::Fill,
-            Some(wgpu::Face::Back),
+            None,
             true,
             wgpu::CompareFunction::Less,
         );
@@ -1216,6 +1223,11 @@ impl State {
             None,
             false,
             wgpu::CompareFunction::LessEqual,
+        );
+
+        let transparent_pipeline = create_model_pipeline(
+            "Transparent model pipeline", wgpu::PrimitiveTopology::TriangleList,
+            wgpu::PolygonMode::Fill, None, false, wgpu::CompareFunction::LessEqual,
         );
 
         let point_uniform = PointUniform {
@@ -1403,6 +1415,7 @@ impl State {
             config,
             is_surface_configured: false,
             render_pipeline,
+            transparent_pipeline,
             window,
             pbr_material,
             wireframe_material,
@@ -1485,6 +1498,7 @@ impl State {
             face_assign_first: 0,
             face_assign_end: 1,
             selected_material_mesh: 0,
+            part_selection: Default::default(),
             lighting,
             shadow_renderer,
             lighting_gpu,
@@ -2664,7 +2678,7 @@ impl State {
                 self.editor.status =
                     format!("Transformed generated {}", self.ground_plane.kind.name());
             }
-        } else if let Some(pivot) = self.selected_gizmo_pivot() {
+        } else if let Some(pivot) = self.selected_gizmo_pivot().filter(|_| !self.part_selection.active) {
             if let Some(change) = object_gizmo::show(
                 &context,
                 &self.camera,
@@ -2705,6 +2719,7 @@ impl State {
         self.viewport_settings_window(&context);
         self.geometry_inspection_window(&context);
         self.lighting_window(&context);
+        self.part_selection_window(&context);
         self.material_browser_window(&context);
         self.demos_window(&context);
         #[cfg(not(target_arch = "wasm32"))]
@@ -3244,7 +3259,7 @@ impl State {
             }
         }
         ui.separator();
-        material::color_controls(ui, &mut self.ground_plane.material.uniform);
+        material::color_controls(ui, "generated_material", &mut self.ground_plane.material.uniform);
         ui.label("The shape is opaque, depth-tested scene geometry.");
     }
 
@@ -3256,6 +3271,7 @@ impl State {
         emissive_path: String,
     ) -> FxMaterial {
         FxMaterial {
+            transparency: uniform.transparency,
             color_adjustments: uniform.color_adjustments,
             emissive_color: uniform.emissive_color,
             base_color: uniform.base_color,
@@ -3664,6 +3680,7 @@ impl State {
     fn clear_imported_model(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         { self.pending_model_load = None; }
+        self.part_selection = Default::default();
         self.obj_model = model::Model {
             import_warnings: Vec::new(),
             imported_scene: None,
@@ -3902,7 +3919,7 @@ impl State {
         }
 
         ui.checkbox(&mut self.editor.texture_enabled, "Texture enabled");
-        material::color_controls(ui, &mut self.pbr_material.uniform);
+        material::color_controls(ui, "global_material", &mut self.pbr_material.uniform);
 
         #[cfg(not(target_arch = "wasm32"))]
         ui.horizontal_wrapped(|ui| {
@@ -4156,6 +4173,8 @@ impl State {
             uniform.color_adjustments[1] = colors.emission_hue;
             uniform.options[1] = colors.intensity;
             uniform.emissive_color = colors.tint;
+            uniform.transparency = colors.transparency;
+            uniform.color_adjustments[3] = if colors.double_sided { 1.0 } else { 0.0 };
         }
         if self.geo_emissive_textures.contains_key(&tile) {
             uniform.color_adjustments[2] = 1.0;
@@ -4169,21 +4188,45 @@ impl State {
         import: &mut Option<((i32, i32), std::path::PathBuf, GroupTextureKind)>,
         reset: &mut Option<((i32, i32), GroupTextureKind)>,
     ) {
-        let mut uniform = self.pbr_material.uniform;
-        self.apply_group_colors(tile, &mut uniform);
+        let assigned = self
+            .obj_model
+            .meshes
+            .iter()
+            .position(|mesh| mesh.uv_tile == tile)
+            .and_then(|index| self.mesh_material_assignments.get(index))
+            .copied()
+            .and_then(|id| {
+                self.material_library
+                    .iter()
+                    .position(|entry| entry.id == id && id.0 != 0)
+            });
+        let mut uniform = assigned.map_or(self.pbr_material.uniform, |index| {
+            self.material_library[index].material.uniform
+        });
+        if assigned.is_none() {
+            self.apply_group_colors(tile, &mut uniform);
+        } else {
+            ui.add(egui::Label::new("These controls edit the assigned scene material, including other groups sharing it.").wrap());
+        }
         let before = uniform;
-        material::color_controls(ui, &mut uniform);
+        material::color_controls(ui, ("group_material", tile), &mut uniform);
         if uniform != before {
-            self.geo_color_settings.insert(
-                tile,
-                GroupColorSettings {
-                    hue: uniform.color_adjustments[0],
-                    emission_hue: uniform.color_adjustments[1],
-                    intensity: uniform.options[1],
-                    tint: uniform.emissive_color,
-                },
-            );
-            self.rebuild_group_material_bind_group(tile);
+            if let Some(index) = assigned {
+                self.material_library[index].material.uniform = uniform;
+            } else {
+                self.geo_color_settings.insert(
+                    tile,
+                    GroupColorSettings {
+                        transparency: uniform.transparency,
+                        double_sided: uniform.color_adjustments[3] > 0.5,
+                        hue: uniform.color_adjustments[0],
+                        emission_hue: uniform.color_adjustments[1],
+                        intensity: uniform.options[1],
+                        tint: uniform.emissive_color,
+                    },
+                );
+                self.rebuild_group_material_bind_group(tile);
+            }
         }
         ui.horizontal(|ui| {
             ui.label("Emissive");
@@ -4695,7 +4738,13 @@ impl State {
             let result = (|| -> anyhow::Result<material_library::SceneMaterial> {
                 let mut material = material::PbrMaterial::new_untextured(&self.device, &self.queue)?;
                 let pbr = source.pbr.as_ref().context("Missing imported PBR parameters")?;
-                material.uniform.base_color = [source.diffuse[0], source.diffuse[1], source.diffuse[2], pbr.opacity.clamp(0.0, 1.0)];
+                material.uniform.base_color = [source.diffuse[0], source.diffuse[1], source.diffuse[2], 1.0];
+                material.uniform.transparency[3] = pbr.opacity.clamp(0.0, 1.0);
+                material.uniform.color_adjustments[3] = if source.double_sided { 1.0 } else { 0.0 };
+                if let Some(cutoff) = source.alpha_cutoff {
+                    material.uniform.transparency[0] = 2.0;
+                    material.uniform.transparency[1] = cutoff.clamp(0.0, 1.0);
+                }
                 material.uniform.properties[0] = pbr.metallic.clamp(0.0, 1.0);
                 material.uniform.properties[1] = pbr.roughness.clamp(0.02, 1.0);
                 material.uniform.emissive_color = [pbr.emissive[0], pbr.emissive[1], pbr.emissive[2], 1.0];
@@ -4749,6 +4798,15 @@ impl State {
             self.apply_imported_pbr_materials();
             return;
         }
+        for source in &mut self.obj_model.materials {
+            if !source.opacity_texture.is_empty() {
+                let base = (!source.diffuse_texture.is_empty()).then(|| root.join(&source.diffuse_texture));
+                match material::bake_opacity_texture(base.as_deref(), &root.join(&source.opacity_texture)) {
+                    Ok(path) => source.diffuse_texture = path.to_string_lossy().into_owned(),
+                    Err(error) => self.obj_model.import_warnings.push(format!("Opacity map {}: {error:#}", source.name)),
+                }
+            }
+        }
         for source in &self.obj_model.materials.clone() {
             if self
                 .material_library
@@ -4770,6 +4828,8 @@ impl State {
             );
             entry.material.uniform.base_color =
                 [source.diffuse[0], source.diffuse[1], source.diffuse[2], 1.0];
+            entry.material.uniform.transparency = material::default_transparency();
+            entry.material.uniform.transparency[3] = source.opacity;
             entry.base_color_path = (!source.diffuse_texture.is_empty())
                 .then(|| root.join(&source.diffuse_texture).display().to_string())
                 .unwrap_or_default();
@@ -4781,6 +4841,18 @@ impl State {
                 .unwrap_or_default();
             entry.emissive_path = (!source.emissive_texture.is_empty())
                 .then(|| root.join(&source.emissive_texture).display().to_string()).unwrap_or_default();
+            for (path, kind) in [(&entry.base_color_path, GroupTextureKind::BaseColor),
+                (&entry.normal_path, GroupTextureKind::Normal), (&entry.roughness_path, GroupTextureKind::Roughness)] {
+                if path.is_empty() { continue; }
+                match self.cached_material_texture(std::path::Path::new(path), matches!(kind, GroupTextureKind::BaseColor)) {
+                    Ok(texture) => match kind {
+                        GroupTextureKind::BaseColor => entry.material.set_base_color_texture(&self.device, texture),
+                        GroupTextureKind::Normal => entry.material.set_normal_texture(&self.device, texture),
+                        _ => entry.material.set_metallic_roughness_texture(&self.device, texture),
+                    },
+                    Err(error) => self.obj_model.import_warnings.push(format!("Material texture: {error:#}")),
+                }
+            }
             if !entry.emissive_path.is_empty() {
                 match self.cached_material_texture(std::path::Path::new(&entry.emissive_path), true) {
                     Ok(texture) => {
@@ -4791,6 +4863,11 @@ impl State {
                 }
             }
             self.material_library.push(entry);
+        }
+        for mesh in &self.obj_model.meshes {
+            if let Some(source) = self.obj_model.materials.get(mesh.material) {
+                self.geo_color_settings.entry(mesh.uv_tile).or_default().transparency[3] = source.opacity;
+            }
         }
         let solid_colors = self
             .obj_model
@@ -4873,12 +4950,28 @@ impl State {
             }
         };
         let root = path.parent().unwrap_or(std::path::Path::new("."));
+        let mut materials = materials;
+        for material in &mut materials {
+            if !material.dissolve_texture.is_empty() {
+                let base = (!material.diffuse_texture.is_empty()).then(|| root.join(&material.diffuse_texture));
+                match material::bake_opacity_texture(base.as_deref(), &root.join(&material.dissolve_texture)) {
+                    Ok(path) => material.diffuse_texture = path.to_string_lossy().into_owned(),
+                    Err(error) => {
+                        self.editor.status = format!("Could not import MTL opacity map: {error:#}");
+                        return;
+                    }
+                }
+            }
+        }
         let mut jobs = Vec::new();
         let mut solid_colors = Vec::new();
         for mesh in &self.obj_model.meshes {
             let Some(material) = materials.get(mesh.material) else {
                 continue;
             };
+            self.geo_color_settings.entry(mesh.uv_tile).or_default().transparency[3] =
+                material.unknown_param.get("Tr").and_then(|v| v.parse::<f32>().ok())
+                    .map_or(material.dissolve, |v| 1.0 - v).clamp(0.0, 1.0);
             let roughness = material
                 .unknown_param
                 .get("map_Pr")
@@ -5365,16 +5458,21 @@ impl State {
         let mut save_user_material = None;
         #[cfg(not(target_arch = "wasm32"))]
         let mut import_new_texture = None;
+        let material_panel_width = (context.content_rect().width() * 0.4).clamp(440.0, 600.0)
+            .min((context.content_rect().width() - 180.0).max(220.0));
         egui::Window::new("Material Browser")
-            .id(egui::Id::new("material_library_window_scrollable_v3"))
+            .id(egui::Id::new("material_library_window_scrollable_v4"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-170.0, 12.0))
-            .default_width(440.0)
+            .default_width(material_panel_width)
+            .max_width(material_panel_width)
             .default_height((context.content_rect().height() - 24.0).max(120.0))
             .min_height(160.0)
             .max_height((context.content_rect().height() - 24.0).max(120.0))
             .resizable(true)
             .vscroll(true)
             .show(context, |ui| {
+                ui.set_width(material_panel_width - 24.0);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                 ui.horizontal(|ui| {
                     ui.heading("Materials");
                     if ui.button("+ New").clicked() {
@@ -5487,7 +5585,7 @@ impl State {
                         egui::Slider::new(&mut entry.material.uniform.properties[2], 0.0..=2.0)
                             .text("Normal Strength"),
                     );
-                    material::color_controls(ui, &mut entry.material.uniform);
+                    material::color_controls(ui, ("library_material", entry.id.0), &mut entry.material.uniform);
                     egui::CollapsingHeader::new("Import Texture Maps").default_open(true).show(ui, |ui| {
                         for (label, path, kind) in [
                             (
@@ -6632,6 +6730,7 @@ impl State {
 
         self.deconstruction = demos::Deconstruction::default();
         self.demo_buffers.clear();
+        self.part_selection = Default::default();
         self.obj_model = loaded_model;
         self.mesh_material_assignments =
             vec![material_library::MaterialId(0); self.obj_model.meshes.len()];
@@ -6723,6 +6822,7 @@ impl State {
     }
 
     fn apply_fx_material_uniform(uniform: &mut material::MaterialUniform, saved: &FxMaterial) {
+        uniform.transparency = saved.transparency;
         uniform.base_color = saved.base_color;
         uniform.color_adjustments = saved.color_adjustments;
         uniform.emissive_color = saved.emissive_color;
@@ -7117,6 +7217,111 @@ impl State {
         self.window.request_redraw();
     }
 
+    fn surface_draws(&self) -> Vec<model::SurfaceDraw<'_>> {
+        let mut draws = Vec::new();
+        let forward = (self.camera.target - self.camera.eye).normalize();
+        let depth = |point: cgmath::Vector4<f32>| {
+            (cgmath::Point3::new(point.x, point.y, point.z) - self.camera.eye).dot(forward)
+        };
+        for object in self
+            .generated_objects
+            .iter()
+            .chain(std::iter::once(&self.ground_plane))
+        {
+            let material = self
+                .generated_material_assignments
+                .get(&object.scene_id)
+                .and_then(|id| self.material_library.iter().find(|entry| entry.id == *id))
+                .map(|entry| &entry.material)
+                .unwrap_or(&object.material);
+            let center = object.model_matrix() * cgmath::Vector4::new(0.0, 0.0, 0.0, 1.0);
+            if let Some(draw) = object.surface_draw(
+                &material.bind_group,
+                depth(center),
+                material.needs_alpha_blend(),
+            ) {
+                draws.push(draw);
+            }
+        }
+        for (index, mesh) in self.obj_model.meshes.iter().enumerate() {
+            if !self.geo_group_enabled.get(index).copied().unwrap_or(true) {
+                continue;
+            }
+            let fallback = self
+                .geo_material_bind_groups
+                .get(&mesh.uv_tile)
+                .filter(|_| self.geo_texture_enabled.get(index).copied().unwrap_or(true))
+                .unwrap_or(&self.pbr_material.bind_group);
+            let mut fallback_uniform = self.pbr_material.uniform;
+            let mut fallback_blend = self.pbr_material.needs_alpha_blend();
+            if self.geo_material_bind_groups.contains_key(&mesh.uv_tile)
+                && self.geo_texture_enabled.get(index).copied().unwrap_or(true)
+            {
+                fallback_uniform.base_color = self
+                    .geo_texture_colors
+                    .get(&mesh.uv_tile)
+                    .copied()
+                    .unwrap_or(fallback_uniform.base_color);
+                self.apply_group_colors(mesh.uv_tile, &mut fallback_uniform);
+                let has_alpha = self
+                    .uv_space_textures
+                    .get(&mesh.uv_tile)
+                    .map_or(false, |texture| texture._viewport_texture.has_transparency);
+                // Group bindings use the global base texture if no group map is set.
+                fallback_blend = fallback_uniform.needs_alpha_blend(has_alpha)
+                    || (self.uv_space_textures.get(&mesh.uv_tile).is_none()
+                        && fallback_uniform
+                            .needs_alpha_blend(self.pbr_material.base_texture_has_alpha()));
+            }
+            let base = self
+                .mesh_material_assignments
+                .get(index)
+                .copied()
+                .filter(|id| id.0 != 0);
+            let overrides = self
+                .face_material_assignments
+                .get(index)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let center = cgmath::Vector4::new(
+                (mesh.bounds_min[0] + mesh.bounds_max[0]) * 0.5,
+                (mesh.bounds_min[1] + mesh.bounds_max[1]) * 0.5,
+                (mesh.bounds_min[2] + mesh.bounds_max[2]) * 0.5,
+                1.0,
+            );
+            for (first, end, id) in material_library::resolved_face_ranges(mesh.num_elements / 3, base, overrides) {
+                let assigned_material = id
+                    .and_then(|id| self.material_library.iter().find(|entry| entry.id == id))
+                    .map(|entry| &entry.material);
+                let material = assigned_material.map(|m| &m.bind_group).unwrap_or(fallback);
+                let blend = assigned_material.map_or(fallback_blend, |m| m.needs_alpha_blend());
+                for (instance_index, instance) in self
+                    .instances
+                    .iter()
+                    .take(self.editor.visible_instance_count)
+                    .enumerate()
+                {
+                    let matrix: cgmath::Matrix4<f32> =
+                        self.demo_instance_raw(instance, index).model.into();
+                    draws.push(model::SurfaceDraw {
+                        vertices: &mesh.vertex_buffer,
+                        indices: &mesh.index_buffer,
+                        instances: self.demo_buffer(index),
+                        material,
+                        index_range: first * 3..end * 3,
+                        instance_range: instance_index as u32..instance_index as u32 + 1,
+                        depth: depth(matrix * center),
+                        blend,
+                    });
+                }
+            }
+        }
+        // Opaque surfaces write depth first; fractional-alpha surfaces blend
+        // back to front without writing depth. Demo offsets and instances count.
+        draws.sort_by(|a, b| b.depth.total_cmp(&a.depth));
+        draws
+    }
+
     fn render(&mut self) -> anyhow::Result<()> {
         self.fps_frames = self.fps_frames.saturating_add(1);
         let sample_elapsed = self.fps_sample_started.elapsed();
@@ -7301,17 +7506,8 @@ impl State {
             }
         }
 
-        self.shadow_renderer.render(
-            &mut encoder,
-            &self.obj_model,
-            &self.geo_group_enabled,
-            &self.instance_buffer,
-            &self.demo_buffers,
-            self.editor.visible_instance_count as u32,
-            self.generated_objects
-                .iter()
-                .chain(std::iter::once(&self.ground_plane)),
-        );
+        let surface_draws = self.surface_draws();
+        self.shadow_renderer.render(&mut encoder, &surface_draws);
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -7348,114 +7544,22 @@ impl State {
                 self.grid
                     .draw(&mut render_pass, &self.grid_camera_bind_group);
             }
-            for object in &self.generated_objects {
-                let material_override = self
-                    .generated_material_assignments
-                    .get(&object.scene_id)
-                    .and_then(|id| self.material_library.iter().find(|entry| entry.id == *id))
-                    .map(|entry| &entry.material.bind_group);
-                object.draw(
-                    &mut render_pass,
-                    &self.render_pipeline,
-                    self.wireframe_pipeline.as_ref(),
-                    &self.quad_line_pipeline,
-                    &self.camera_bind_group,
-                    &self.environment_lighting_bind_group,
-                    &self.lighting_gpu.bind_group,
-                    material_override,
-                );
-            }
-            let ground_material_override = self
-                .generated_material_assignments
-                .get(&self.ground_plane.scene_id)
-                .and_then(|id| self.material_library.iter().find(|entry| entry.id == *id))
-                .map(|entry| &entry.material.bind_group);
-            self.ground_plane.draw(
-                &mut render_pass,
-                &self.render_pipeline,
-                self.wireframe_pipeline.as_ref(),
-                &self.quad_line_pipeline,
-                &self.camera_bind_group,
-                &self.environment_lighting_bind_group,
-                &self.lighting_gpu.bind_group,
-                ground_material_override,
-            );
-            // Always preserve the shaded surface. Wireframe mode adds a second,
-            // high-contrast overlay pass below.
-            render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
             render_pass.set_bind_group(2, &self.environment_lighting_bind_group, &[]);
             render_pass.set_bind_group(3, &self.lighting_gpu.bind_group, &[]);
-
-            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-
-            use model::DrawModel;
-
-            for (mesh_index, mesh) in self.obj_model.meshes.iter().enumerate() {
-                render_pass.set_vertex_buffer(1, self.demo_buffer(mesh_index).slice(..));
-                if !self
-                    .geo_group_enabled
-                    .get(mesh_index)
-                    .copied()
-                    .unwrap_or(true)
-                {
-                    continue;
-                }
-                let tile = mesh.uv_tile;
-                let material_bind_group = self
-                    .geo_material_bind_groups
-                    .get(&tile)
-                    .filter(|_| {
-                        self.geo_texture_enabled
-                            .get(mesh_index)
-                            .copied()
-                            .unwrap_or(true)
-                    })
-                    .unwrap_or(&self.pbr_material.bind_group);
-                let face_count = mesh.num_elements / 3;
-                let base_assignment = self
-                    .mesh_material_assignments
-                    .get(mesh_index)
-                    .copied()
-                    .filter(|id| id.0 != 0);
-                let overrides = self
-                    .face_material_assignments
-                    .get(mesh_index)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                let material_for_face = |face: u32| {
-                    overrides
-                        .iter()
-                        .rev()
-                        .find(|assignment| {
-                            face >= assignment.first_face && face < assignment.end_face
-                        })
-                        .map(|assignment| assignment.material)
-                        .or(base_assignment)
-                };
-                let mut first_face = 0;
-                while first_face < face_count {
-                    let assignment = material_for_face(first_face);
-                    let mut end_face = first_face + 1;
-                    while end_face < face_count && material_for_face(end_face) == assignment {
-                        end_face += 1;
-                    }
-                    let assigned_bind_group = assignment
-                        .and_then(|id| self.material_library.iter().find(|entry| entry.id == id))
-                        .map(|entry| &entry.material.bind_group)
-                        .unwrap_or(material_bind_group);
-                    render_pass.set_bind_group(0, assigned_bind_group, &[]);
-                    render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    render_pass
-                        .set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    render_pass.draw_indexed(
-                        first_face * 3..end_face * 3,
-                        0,
-                        0..self.editor.visible_instance_count as u32,
-                    );
-                    first_face = end_face;
-                }
+            render_pass.set_pipeline(&self.render_pipeline);
+            for draw in &surface_draws { draw.draw(&mut render_pass, 0); }
+            render_pass.set_pipeline(&self.transparent_pipeline);
+            for draw in surface_draws.iter().filter(|draw| draw.blend) { draw.draw(&mut render_pass, 0); }
+            self.draw_part_highlight(&mut render_pass);
+            // Draw generated-object wire overlays after both surface passes.
+            for object in self.generated_objects.iter().chain(std::iter::once(&self.ground_plane)) {
+                object.draw(&mut render_pass, &self.render_pipeline,
+                    self.wireframe_pipeline.as_ref(), &self.quad_line_pipeline,
+                    &self.camera_bind_group, &self.environment_lighting_bind_group,
+                    &self.lighting_gpu.bind_group, None, false);
             }
+            use model::DrawModel;
 
             if self.model_view_mode == ModelViewMode::Wireframe {
                 if let Some(wireframe_pipeline) = self.wireframe_pipeline.as_ref() {
@@ -7980,6 +8084,20 @@ impl ApplicationHandler<State> for App {
                 state.window.request_redraw();
             }
 
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    physical_key: PhysicalKey::Code(KeyCode::KeyT),
+                    state: ElementState::Pressed, repeat: false, ..
+                }, ..
+            } if !state.egui.context.egui_wants_keyboard_input()
+                && !state.houdini_navigation.view_mode_active()
+                && !state.houdini_navigation.control_held
+                && !state.undo_modifier_held =>
+            {
+                state.toggle_part_selection();
+                state.window.request_redraw();
+            }
+
             // MouseINPUT //
             WindowEvent::MouseInput {
                 state: button_state,
@@ -7988,7 +8106,11 @@ impl ApplicationHandler<State> for App {
             } => {
                 if button_state == ElementState::Pressed {
                     if button == MouseButton::Left && !state.houdini_navigation.view_mode_active() {
-                        state.select_instance_at_cursor();
+                        if state.part_selection.active {
+                            state.select_part_at_cursor();
+                        } else {
+                            state.select_instance_at_cursor();
+                        }
                     }
                     state.houdini_navigation.begin_mouse_action(button);
                 }
@@ -8090,6 +8212,7 @@ mod fx_project_tests {
             "base_color_path": "", "normal_path": "", "roughness_path": ""
         }))
         .unwrap();
+        assert_eq!(saved.transparency, material::default_transparency());
         assert_eq!(saved.color_adjustments, [0.0; 4]);
         assert_eq!(saved.emissive_color, [1.0; 4]);
         assert_eq!(saved.options[1], 2.0);
@@ -8117,6 +8240,8 @@ mod fx_project_tests {
             color: [1.0; 4],
             normal_strength: 1.0,
             colors: Some(GroupColorSettings {
+                transparency: [2.0, 0.3, 0.0, 0.4],
+                double_sided: true,
                 hue: 45.0,
                 emission_hue: -120.0,
                 intensity: 0.0,
@@ -8128,6 +8253,8 @@ mod fx_project_tests {
         assert_eq!(restored.emissive, "emission.png");
         let settings = restored.colors.unwrap();
         assert_eq!(settings.intensity, 0.0);
+        assert_eq!(settings.transparency, [2.0, 0.3, 0.0, 0.4]);
+        assert!(settings.double_sided);
         assert_eq!(settings.hue, 45.0);
         assert_eq!(settings.emission_hue, -120.0);
         assert_eq!(settings.tint, [0.2, 0.5, 1.0, 1.0]);
@@ -8136,6 +8263,7 @@ mod fx_project_tests {
     #[test]
     fn fx_project_schema_round_trips() {
         let material = FxMaterial {
+            transparency: material::default_transparency(),
             color_adjustments: [30.0, 120.0, 1.0, 0.0],
             emissive_color: [0.8, 0.2, 0.5, 1.0],            base_color: [0.2, 0.3, 0.4, 1.0],
             properties: [0.1, 0.5, 1.0, 1.0],
@@ -8172,6 +8300,7 @@ mod fx_project_tests {
                 material,
             }],
             material: FxMaterial {
+            transparency: material::default_transparency(),
             color_adjustments: [0.0; 4],
             emissive_color: [1.0; 4],                base_color: [1.0; 4],
                 properties: [0.0, 0.5, 1.0, 1.0],

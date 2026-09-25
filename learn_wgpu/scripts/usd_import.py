@@ -197,10 +197,18 @@ class Importer:
     def material(self, prim):
         bound, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
         key = str(bound.GetPath()) if bound else "display:" + str(prim.GetPath())
+        surface_prim = prim.GetParent() if prim.IsA(UsdGeom.Subset) else prim
+        gprim = UsdGeom.Gprim(surface_prim)
+        double_sided = bool(gprim and gprim.GetDoubleSidedAttr().Get(self.time))
+        # A shared USD material can be bound to single- and double-sided meshes.
+        if double_sided:
+            key += " · Double sided"
         if key in self.material_ids:
             return self.material_ids[key]
         record = dict(
             name=key,
+            double_sided=double_sided,
+            alpha_cutoff=None,
             diffuse=[0.8, 0.8, 0.8],
             diffuse_texture="",
             normal_texture="",
@@ -217,6 +225,9 @@ class Importer:
             record["diffuse"] = list(
                 self.input_value(shader, "diffuseColor", (0.18, 0.18, 0.18))
             )
+            cutoff = float(self.input_value(shader, "opacityThreshold", 0.0))
+            if cutoff > 0:
+                record["alpha_cutoff"] = cutoff
             record["pbr"].update(
                 metallic=float(self.input_value(shader, "metallic", 0)),
                 roughness=float(self.input_value(shader, "roughness", 0.5)),

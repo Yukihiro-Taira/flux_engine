@@ -365,6 +365,15 @@ impl GroundPlane {
             )
     }
 
+    pub fn surface_draw<'a>(&'a self, material: &'a wgpu::BindGroup, depth: f32, blend: bool) -> Option<crate::model::SurfaceDraw<'a>> {
+        if !self.generated || !self.visible || (self.wireframe && self.hide_surface) { return None; }
+        Some(crate::model::SurfaceDraw {
+            vertices: &self.vertex_buffer, indices: &self.index_buffer,
+            instances: &self.instance_buffer, material,
+            index_range: 0..self.index_count, instance_range: 0..1, depth, blend,
+        })
+    }
+
     pub fn draw<'a>(
         &'a self,
         render_pass: &mut wgpu::RenderPass<'a>,
@@ -375,6 +384,7 @@ impl GroundPlane {
         environment: &'a wgpu::BindGroup,
         lighting: &'a wgpu::BindGroup,
         material_override: Option<&'a wgpu::BindGroup>,
+        draw_surface: bool,
     ) {
         if !self.generated || !self.visible {
             return;
@@ -389,7 +399,7 @@ impl GroundPlane {
         render_pass.set_bind_group(3, lighting, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        if !self.wireframe || !self.hide_surface {
+        if draw_surface && (!self.wireframe || !self.hide_surface) {
             render_pass.set_pipeline(solid_pipeline);
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             render_pass.draw_indexed(0..self.index_count, 0, 0..1);
@@ -410,15 +420,7 @@ impl GroundPlane {
         }
     }
 
-    pub fn draw_shadow<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
-        if !self.generated || !self.visible {
-            return;
-        }
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        render_pass.draw_indexed(0..self.index_count, 0, 0..1);
-    }
+
 }
 
 fn quad_edge_indices(triangle_indices: &[u32]) -> Vec<u32> {
