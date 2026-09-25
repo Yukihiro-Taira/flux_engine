@@ -128,8 +128,8 @@ impl AssetExplorer {
         let mut history = None;
         let mut refresh = false;
         let favorites = favorites();
-        let screen = context.content_rect().size();
-        egui::Window::new("Asset Explorer")
+        let screen = crate::timeline::workspace_rect(context).size();
+        egui::Window::new("Asset Explorer").constrain_to(crate::timeline::workspace_rect(context))
             .id(egui::Id::new("asset_explorer_polished"))
             .open(open)
             .default_pos(egui::pos2(24.0, 40.0))

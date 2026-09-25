@@ -17,10 +17,11 @@ from PIL import Image
 
 
 class Importer:
-    def __init__(self, path, cache, time=None):
+    def __init__(self, path, cache, time=None, stage=None, local_geometry=False):
+        self.local_geometry = local_geometry
         self.cache = Path(cache)
         self.cache.mkdir(parents=True, exist_ok=True)
-        self.stage = Usd.Stage.Open(str(Path(path).resolve()), load=Usd.Stage.LoadAll)
+        self.stage = stage or Usd.Stage.Open(str(Path(path).resolve()), load=Usd.Stage.LoadAll)
         if not self.stage:
             raise ValueError("OpenUSD could not open the stage")
         self.time = Usd.TimeCode(
@@ -43,9 +44,21 @@ class Importer:
         for error in self.stage.GetCompositionErrors():
             self.warn(f"Composition: {error}")
         if self.stage.HasAuthoredTimeCodeRange():
-            self.warn(
-                f"Imported an evaluated snapshot at time code {self.time.GetValue():g}; animation is not a viewport timeline."
-            )
+            start, end = self.stage.GetStartTimeCode(), self.stage.GetEndTimeCode()
+            animated = any(attr.GetNumTimeSamples() > 0
+                           for prim in self.stage.Traverse() for attr in prim.GetAttributes())
+        else:
+            start, end, animated = math.inf, -math.inf, False
+            for prim in self.stage.Traverse():
+                for attr in prim.GetAttributes():
+                    samples = attr.GetTimeSamples()
+                    if samples:
+                        animated = True
+                        start, end = min(start, samples[0]), max(end, samples[-1])
+            if not animated:
+                start = end = 0
+        self.animation = dict(start=start, end=end, rate=self.stage.GetTimeCodesPerSecond(),
+                              animated=end > start and animated, name="USD stage")
 
     def warn(self, text):
         self.warnings.add(str(text))
@@ -475,6 +488,8 @@ class Importer:
             if transform is not None
             else self.transforms.GetLocalToWorldTransform(prim)
         )
+        if self.local_geometry:
+            world = Gf.Matrix4d(1)
         normal_matrix = world.GetInverse().GetTranspose()
         left = UsdGeom.Gprim(prim).GetOrientationAttr().Get() == "leftHanded"
         reverse = left != (world.GetDeterminant() < 0)
@@ -909,12 +924,68 @@ class Importer:
             materials=self.materials,
             warnings=sorted(self.warnings),
             time_code=self.time.GetValue(),
-            scene=dict(lights=self.lights, cameras=self.cameras),
+            scene=dict(lights=self.lights, cameras=self.cameras, animation=self.animation),
         )
+
+
+class TransformSampler:
+    """Keep static mesh buffers intact when only scene transforms animate."""
+    def __init__(self, stage):
+        self.stage = stage
+        self.prims = list(Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()))
+        self.supported = not any(
+            prim.IsA(UsdSkel.Root) or prim.IsA(UsdGeom.PointInstancer)
+            or any(attr.GetNumTimeSamples() > 1 and (
+                not attr.GetName().startswith("xformOp"))
+                for attr in prim.GetAttributes())
+            for prim in self.prims)
+        self.prims = [prim for prim in self.prims if prim.IsA(UsdGeom.Mesh)
+                      or prim.GetTypeName() in ("Cube", "Sphere", "Cylinder", "Cone", "Capsule", "Plane")]
+        scale = UsdGeom.GetStageMetersPerUnit(stage)
+        if UsdGeom.GetStageUpAxis(stage) == UsdGeom.Tokens.z:
+            self.axes = Gf.Matrix4d(scale,0,0,0, 0,scale,0,0, 0,0,scale,0, 0,0,0,1)
+        else:
+            self.axes = Gf.Matrix4d(scale,0,0,0, 0,0,scale,0, 0,-scale,0,0, 0,0,0,1)
+        self.inverse_axes = self.axes.GetInverse()
+
+    def sample(self, time):
+        if not self.supported:
+            return None
+        cache = UsdGeom.XformCache(Usd.TimeCode(time))
+        transforms = {}
+        for prim in self.prims:
+            path = str(prim.GetPath())
+            delta = self.inverse_axes * cache.GetLocalToWorldTransform(prim) * self.axes
+            transforms[path] = [[delta[r][c] for c in range(4)] for r in range(4)]
+        return {"transforms": transforms, "time_code": time}
 
 
 def main():
     try:
+        if len(sys.argv) > 3 and sys.argv[3] == "--serve":
+            stage = Usd.Stage.Open(str(Path(sys.argv[1]).resolve()), load=Usd.Stage.LoadAll)
+            if not stage:
+                raise ValueError("OpenUSD could not open the stage")
+            sampler = TransformSampler(stage)
+            local_geometry_sent = False
+            for line in sys.stdin:
+                try:
+                    request = json.loads(line)
+                    time = float(request["time"] if isinstance(request, dict) else request)
+                    if not math.isfinite(time):
+                        raise ValueError("Time must be finite")
+                    result = sampler.sample(time) if isinstance(request, dict) else None
+                    if result is None:
+                        result = Importer(sys.argv[1], sys.argv[2], time, stage=stage).run()
+                    elif not local_geometry_sent:
+                        geometry = Importer(sys.argv[1], sys.argv[2], time, stage=stage, local_geometry=True).run()
+                        geometry.update(result)
+                        result = geometry
+                        local_geometry_sent = True
+                except Exception as error:
+                    result = {"error": str(error)}
+                print(json.dumps(result, allow_nan=False, separators=(",", ":")), flush=True)
+            return 0
         time = (
             None
             if len(sys.argv) < 4 or sys.argv[3] == "default"

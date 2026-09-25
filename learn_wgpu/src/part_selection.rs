@@ -143,6 +143,7 @@ impl State {
             highlight.upload(&self.queue);
             self.part_selection.highlight = Some(highlight);
         }
+        self.timeline.pause_for_edit();
         self.part_selection.active = true;
         self.editor.status =
             "Part selection · click a group (UV island for a single-group model) · T to exit"
@@ -257,7 +258,7 @@ impl State {
         let mut assign = false;
         let mut unique = false;
         let mut clear = false;
-        egui::Window::new("Selected Geometry").id(egui::Id::new("selected_geometry_material_layer"))
+        egui::Window::new("Selected Geometry").constrain_to(crate::timeline::workspace_rect(context)).id(egui::Id::new("selected_geometry_material_layer"))
             .default_pos(egui::pos2(20.0,280.0)).default_width(290.0).show(context,|ui| {
             ui.strong("Part selection active · T to exit");
             if let Some(selected) = &self.part_selection.selected {

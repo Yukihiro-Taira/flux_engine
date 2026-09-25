@@ -6,7 +6,7 @@ use wgpu::util::DeviceExt;
 use crate::model;
 
 #[cfg(not(target_arch = "wasm32"))]
-const MODEL_CACHE_VERSION: u32 = 7;
+const MODEL_CACHE_VERSION: u32 = 8;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -17,7 +17,7 @@ struct ModelCache {
     model: PreparedModel,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PreparedModel {
     meshes: Vec<PreparedMesh>,
     materials: Vec<model::MaterialSource>,
@@ -25,7 +25,7 @@ pub(crate) struct PreparedModel {
     imported_scene: Option<crate::usd_import::ImportedScene>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct PreparedMesh {
     name: String,
     vertices: Vec<model::ModelVertex>,
@@ -45,6 +45,9 @@ pub(crate) fn prepare_model_from_path(
     // Always recompose it; a root-file-only OBJ/FBX cache cannot validate those dependencies.
     if crate::usd_import::is_usd(path) {
         return load_usd_from_path(path, time_code);
+    }
+    if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("fbx")) {
+        return load_fbx_frame(path, time_code);
     }
     let metadata = std::fs::metadata(path)?;
     let source_modified_ns = metadata
@@ -137,6 +140,10 @@ fn load_prepared_model(path: &std::path::Path) -> anyhow::Result<PreparedModel> 
 #[cfg(not(target_arch = "wasm32"))]
 fn load_usd_from_path(path: &std::path::Path, time_code: Option<f64>) -> anyhow::Result<PreparedModel> {
     let scene = crate::usd_import::load(path, time_code)?;
+    prepare_usd_scene(scene, path)
+}
+
+pub(crate) fn prepare_usd_scene(scene: crate::usd_import::UsdScene, path: &std::path::Path) -> anyhow::Result<PreparedModel> {
     log::info!("Composed USD at time code {}", scene.time_code);
     let models: Vec<_> = scene.meshes.into_iter().map(|mesh| tobj::Model {
         name: mesh.name,
@@ -158,6 +165,9 @@ fn load_usd_from_path(path: &std::path::Path, time_code: Option<f64>) -> anyhow:
 
 #[cfg(not(target_arch = "wasm32"))]
 fn load_fbx_from_path(path: &std::path::Path) -> anyhow::Result<PreparedModel> {
+    load_fbx_frame(path, None)
+}
+fn load_fbx_frame(path: &std::path::Path, frame: Option<f64>) -> anyhow::Result<PreparedModel> {
     let filename = path
         .to_str()
         .context("FBX path contains unsupported non-UTF-8 characters")?;
@@ -167,6 +177,18 @@ fn load_fbx_from_path(path: &std::path::Path) -> anyhow::Result<PreparedModel> {
     options.generate_missing_normals = true;
     let scene = ufbx::load_file(filename, options)
         .map_err(|error| anyhow::anyhow!("FBX parse failed: {error:?}"))?;
+    let rate = scene.settings.frames_per_second;
+    let rate = if rate.is_finite() && rate > 0.0 { rate } else { 24.0 };
+    let clip = crate::usd_import::AnimationClip {
+        start: scene.anim.time_begin * rate, end: scene.anim.time_end * rate, rate,
+        animated: scene.anim.time_end > scene.anim.time_begin && !scene.anim_stacks.is_empty(),
+        name: scene.anim_stacks.first().map(|s|s.element.name.as_ref().to_owned()).unwrap_or_else(||"FBX animation".into()),
+    };
+    let mut evaluate = ufbx::EvaluateOpts::default();
+    evaluate.evaluate_skinning = true;
+    evaluate.evaluate_caches = true;
+    let scene = ufbx::evaluate_scene(&scene, &scene.anim, frame.unwrap_or(clip.start)/rate, evaluate)
+        .map_err(|error| anyhow::anyhow!("FBX animation evaluation failed: {error:?}"))?;
     let mut imported_models = Vec::new();
 
     for node in &scene.nodes {
@@ -176,7 +198,7 @@ fn load_fbx_from_path(path: &std::path::Path) -> anyhow::Result<PreparedModel> {
         if mesh.num_faces == 0 {
             continue;
         }
-        let mut partitions = HashMap::<u32, tobj::Mesh>::new();
+        let mut partitions = std::collections::BTreeMap::<u32, tobj::Mesh>::new();
         let mut triangle_indices = Vec::new();
         for (face_index, &face) in mesh.faces.iter().enumerate() {
             triangle_indices.clear();
@@ -185,8 +207,9 @@ fn load_fbx_from_path(path: &std::path::Path) -> anyhow::Result<PreparedModel> {
             let output = partitions.entry(material_index).or_default();
             for &corner_index in &triangle_indices {
                 let corner_index = corner_index as usize;
-                let source_position = mesh.vertex_position[corner_index];
-                let position = ufbx::transform_position(&node.geometry_to_world, source_position);
+                let source_position = if mesh.skinned_position.exists { mesh.skinned_position[corner_index] } else { mesh.vertex_position[corner_index] };
+                let position = if mesh.skinned_position.exists && !mesh.skinned_is_local { source_position }
+                    else { ufbx::transform_position(&node.geometry_to_world, source_position) };
                 output.positions.extend_from_slice(&[
                     position.x as f32,
                     position.y as f32,
@@ -247,7 +270,9 @@ fn load_fbx_from_path(path: &std::path::Path) -> anyhow::Result<PreparedModel> {
             ..Default::default()
         }
     }).collect();
-    build_model(imported_models, imported_materials, &label)
+    let mut prepared = build_model(imported_models, imported_materials, &label)?;
+    prepared.imported_scene = Some(crate::usd_import::ImportedScene { animation: Some(clip), ..Default::default() });
+    Ok(prepared)
 }
 
 fn build_model(
@@ -1122,6 +1147,59 @@ mod tests {
     }
 
     #[test]
+    fn fbx_animation_evaluates_embedded_transform_keys() {
+        let root = std::env::temp_dir().join(format!("wgpu-fbx-animation-{}",std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path=root.join("animated.fbx");
+        std::fs::write(&path, r#"; FBX 7.4.0 project file
+FBXHeaderExtension: { FBXVersion: 7400 }
+Objects: {
+ Geometry: 1, "Geometry::Triangle", "Mesh" {
+  Vertices: *9 { a: 0,0,0,1,0,0,0,1,0 }
+  PolygonVertexIndex: *3 { a: 0,1,-3 }
+ }
+ Model: 2, "Model::Triangle", "Mesh" {
+  Properties70: { P: "Lcl Translation", "Lcl Translation", "", "A",0,0,0 }
+ }
+ AnimationStack: 3, "AnimStack::Take", "" {
+  Properties70: {
+   P: "LocalStart", "KTime", "Time", "",0
+   P: "LocalStop", "KTime", "Time", "",46186158000
+  }
+ }
+ AnimationLayer: 4, "AnimLayer::BaseLayer", "" { }
+ AnimationCurveNode: 5, "AnimCurveNode::T", "" {
+  Properties70: { P: "d|X", "Number", "", "A",0 }
+ }
+ AnimationCurve: 6, "AnimCurve::X", "" {
+  Default: 0
+  KeyVer: 4008
+  KeyTime: *2 { a: 0,46186158000 }
+  KeyValueFloat: *2 { a: 0,2 }
+  KeyAttrFlags: *2 { a: 4,4 }
+  KeyAttrDataFloat: *8 { a: 0,0,0,0,0,0,0,0 }
+  KeyAttrRefCount: *2 { a: 1,1 }
+ }
+}
+Connections: {
+ C: "OO",1,2
+ C: "OO",2,0
+ C: "OO",4,3
+ C: "OO",5,4
+ C: "OP",5,2,"Lcl Translation"
+ C: "OP",6,5,"d|X"
+}
+"#).unwrap();
+        let first=load_fbx_frame(&path,None).unwrap();
+        let clip=first.imported_scene.as_ref().unwrap().animation.as_ref().unwrap();
+        assert!(clip.animated);
+        let last=load_fbx_frame(&path,Some(clip.end)).unwrap();
+        assert!(last.meshes[0].bounds_min[0] > first.meshes[0].bounds_min[0]);
+        assert_eq!(first.meshes[0].name,last.meshes[0].name);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn outdated_model_cache_is_rejected_before_decoding_materials() {
         let mut bytes = (MODEL_CACHE_VERSION - 1).to_le_bytes().to_vec();
         bytes.extend_from_slice(&[255; 64]);
@@ -1270,5 +1348,11 @@ mod tests {
             normal: [0.0; 3],
             tangent: [1.0, 0.0, 0.0, 1.0],
         }
+    }
+}
+
+impl PreparedModel {
+    pub(crate) fn animation_bytes(&self) -> usize {
+        self.meshes.iter().map(|mesh| mesh.vertices.len()*std::mem::size_of::<model::ModelVertex>()+mesh.indices.len()*4).sum()
     }
 }

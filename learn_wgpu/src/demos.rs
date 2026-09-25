@@ -69,6 +69,10 @@ impl crate::State {
         group: usize,
     ) -> crate::InstanceRaw {
         let mut raw = instance.to_raw();
+        if let Some(transform)=self.obj_model.meshes.get(group).and_then(|mesh|self.timeline.transform_for(&mesh.name)) {
+            let model: cgmath::Matrix4<f32> = raw.model.into();
+            raw.model=(model*transform).into();
+        }
         let offset = self
             .deconstruction
             .offset(group, self.obj_model.meshes.len());
@@ -81,10 +85,8 @@ impl crate::State {
     }
 
     pub(super) fn update_demo_buffers(&mut self) {
-        if !self.deconstruction.enabled
-            || self.deconstruction.distance == 0.0
-            || self.obj_model.meshes.len() < 2
-            || self.instances.is_empty()
+        if ((!self.deconstruction.enabled || self.deconstruction.distance == 0.0 || self.obj_model.meshes.len() < 2)
+            && !self.timeline.has_transforms()) || self.instances.is_empty()
         {
             self.demo_buffers.clear();
             return;
@@ -159,11 +161,11 @@ impl crate::State {
             .max(self.deconstruction.distance)
             .min(100_000.0);
         let mut frame = false;
-        egui::Window::new("Demos")
+        egui::Window::new("Demos").constrain_to(crate::timeline::workspace_rect(context))
             .id(egui::Id::new("visual_demos_window"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-170.0, 12.0))
             .default_width(360.0).resizable(true).vscroll(true)
-            .max_height((context.content_rect().height() - 24.0).max(160.0))
+            .max_height((crate::timeline::workspace_rect(context).height() - 24.0).max(160.0))
             .show(context, |ui| {
                 ui.heading("Visual demos");
                 ui.weak("Presentation presets for your model");

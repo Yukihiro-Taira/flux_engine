@@ -30,6 +30,7 @@ mod editor_ui;
 mod demos;
 mod user_data;
 mod preferences;
+mod frame_profile;
 mod egui_renderer;
 mod environment;
 mod grid;
@@ -44,6 +45,7 @@ mod model;
 mod navigation_gizmo;
 mod object_gizmo;
 mod part_selection;
+mod timeline;
 mod resources;
 mod usd_import;
 mod texture;
@@ -652,6 +654,7 @@ pub struct State {
     face_assign_end: u32,
     selected_material_mesh: usize,
     part_selection: part_selection::PartSelection,
+    timeline: timeline::Timeline,
     lighting: lighting::LightingManager,
     shadow_renderer: lighting::shadow::ShadowRenderer,
     lighting_gpu: lighting::LightingGpu,
@@ -1499,6 +1502,7 @@ impl State {
             face_assign_end: 1,
             selected_material_mesh: 0,
             part_selection: Default::default(),
+            timeline: Default::default(),
             lighting,
             shadow_renderer,
             lighting_gpu,
@@ -2564,10 +2568,12 @@ impl State {
     // UI STUFF//
     fn build_editor_ui(&mut self, ui: &mut egui::Ui) {
         let context = ui.ctx().clone();
+        // Docked editors (including the material graph) reserve the playbar's space.
+        ui.set_max_height(timeline::workspace_rect(&context).height());
         self.side_panel_tabs(&context);
         self.asset_explorer_window(&context);
         self.viewport_generate_popup(&context);
-        let panel_max_height = (context.content_rect().height() - 24.0).max(120.0);
+        let panel_max_height = (timeline::workspace_rect(&context).height() - 24.0).max(120.0);
         let imported_object_controls = !self.ground_plane.selected && !self.instances.is_empty();
         let object_panel_width = if imported_object_controls {
             (context.content_rect().width() * 0.38).clamp(440.0, 680.0)
@@ -2589,7 +2595,7 @@ impl State {
                 .max_height(panel_max_height)
                 .resizable(true)
                 .collapsible(true)
-                .constrain(true)
+                .constrain_to(timeline::workspace_rect(&context))
                 .vscroll(true)
                 .show(ui, |ui| {
                     ui.set_width(object_panel_width - 24.0);
@@ -2731,6 +2737,7 @@ impl State {
             &mut self.pbr_material.uniform,
             self.material_preview.texture_id,
         );
+        self.timeline_ui(&context);
     }
 
     fn side_panel_tabs(&mut self, context: &egui::Context) {
@@ -2949,7 +2956,7 @@ impl State {
 
         let mut open = true;
         let mut selected = None;
-        egui::Window::new("Generate")
+        egui::Window::new("Generate").constrain_to(timeline::workspace_rect(&context))
             .id(egui::Id::new("viewport_generate_popup"))
             .fixed_pos(self.generate_popup_position)
             .open(&mut open)
@@ -3626,7 +3633,7 @@ impl State {
                     ui.add(egui::DragValue::new(&mut self.editor.usd_time_code).speed(1.0));
                 });
             });
-            ui.add(egui::Label::new(egui::RichText::new("Import evaluates the composed scene at this time. Reimport to change the snapshot.").small()).wrap());
+            ui.add(egui::Label::new(egui::RichText::new("Choose the initial sample here. Use the bottom timeline to play or scrub animation.").small()).wrap());
         }
         #[cfg(not(target_arch = "wasm32"))]
         if self.pending_model_load.is_some() {
@@ -3678,6 +3685,7 @@ impl State {
     }
 
     fn clear_imported_model(&mut self) {
+        self.timeline = Default::default();
         #[cfg(not(target_arch = "wasm32"))]
         { self.pending_model_load = None; }
         self.part_selection = Default::default();
@@ -4001,7 +4009,30 @@ impl State {
             .default_open(true)
             .show(ui, |ui| {
                 ui.small("Assign maps independently to each uploaded mesh group.");
-                for group_index in 0..group_count {
+                // Only build the selected group's controls. Hundreds of hidden
+                // texture editors otherwise consume the entire playback budget.
+                let selection_id = ui.id().with("texture_group_selection");
+                let mut selected = ui.data_mut(|data| data.get_temp::<usize>(selection_id))
+                    .unwrap_or(0).min(group_count - 1);
+                let short_name = |index: usize| {
+                    let name = self.obj_model.meshes[index].name.split(" · ").next().unwrap_or("");
+                    format!("{}: {}", index + 1, name.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("Group"))
+                };
+                egui::ComboBox::from_id_salt("texture_group_picker")
+                    .selected_text(short_name(selected))
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        egui::ScrollArea::vertical().max_height(240.0).show_rows(
+                            ui, ui.text_style_height(&egui::TextStyle::Body), group_count, |ui, rows| {
+                                for index in rows {
+                                    ui.selectable_value(&mut selected, index, short_name(index))
+                                        .on_hover_text(&self.obj_model.meshes[index].name);
+                                }
+                            });
+                    });
+                ui.data_mut(|data| data.insert_temp(selection_id, selected));
+                let group_index = selected;
+                ui.push_id(("texture_group", group_index), |ui| {
                     let mesh = &self.obj_model.meshes[group_index];
                     let tile = mesh.uv_tile;
                     let name = if mesh.name.trim().is_empty() {
@@ -4153,7 +4184,7 @@ impl State {
                             }
                         });
                     });
-                }
+                });
             });
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -4299,7 +4330,7 @@ impl State {
 
     fn viewport_settings_window(&mut self, context: &egui::Context) {
         egui::Area::new(egui::Id::new("viewport_settings_button"))
-            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(0.0, -16.0))
+            .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(0.0, -16.0 - timeline::HEIGHT))
             .order(egui::Order::Foreground)
             .show(context, |ui| {
                 let cog_color = ui.visuals().text_color().gamma_multiply(0.5);
@@ -4332,9 +4363,9 @@ impl State {
             .default_width(280.0)
             .movable(true)
             .resizable(true)
-            .constrain(true);
+            .constrain_to(timeline::workspace_rect(&context));
         if self.viewport_settings_just_opened {
-            window = window.current_pos(context.content_rect().center());
+            window = window.current_pos(timeline::workspace_rect(context).center());
         }
         window.show(context, |ui| self.viewport_settings_contents(ui));
         self.viewport_settings_open = open;
@@ -4369,12 +4400,12 @@ impl State {
             .id(egui::Id::new("lighting_window_scrollable_v3"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-170.0, 12.0))
             .default_width(360.0)
-            .default_height((context.content_rect().height() - 24.0).max(120.0))
+            .default_height((timeline::workspace_rect(context).height() - 24.0).max(120.0))
             .min_height(160.0)
-            .max_height((context.content_rect().height() - 24.0).max(120.0))
+            .max_height((timeline::workspace_rect(context).height() - 24.0).max(120.0))
             .resizable(true)
             .collapsible(true)
-            .constrain(true)
+            .constrain_to(timeline::workspace_rect(&context))
             .vscroll(true)
             .show(context, |ui| {
                 self.hdri_ui(ui);
@@ -4391,12 +4422,12 @@ impl State {
             .id(egui::Id::new("geometry_inspection_window_scrollable_v3"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-170.0, 12.0))
             .default_width(280.0)
-            .default_height((context.content_rect().height() - 24.0).max(120.0))
+            .default_height((timeline::workspace_rect(context).height() - 24.0).max(120.0))
             .min_height(160.0)
-            .max_height((context.content_rect().height() - 24.0).max(120.0))
+            .max_height((timeline::workspace_rect(context).height() - 24.0).max(120.0))
             .resizable(true)
             .collapsible(true)
-            .constrain(true)
+            .constrain_to(timeline::workspace_rect(&context))
             .vscroll(true)
             .show(context, |ui| {
                 ui.heading("Model View");
@@ -5128,7 +5159,7 @@ impl State {
             .min_width(280.0)
             .min_width(240.0)
             .resizable(true)
-            .constrain(true)
+            .constrain_to(timeline::workspace_rect(&context))
             .show(context, |ui| {
                 egui::ComboBox::from_id_salt("uv_import_kind").selected_text(match self.uv_import_kind {
                     GroupTextureKind::BaseColor => "Import: Base color", GroupTextureKind::Normal => "Import: Normal",
@@ -5460,14 +5491,14 @@ impl State {
         let mut import_new_texture = None;
         let material_panel_width = (context.content_rect().width() * 0.4).clamp(440.0, 600.0)
             .min((context.content_rect().width() - 180.0).max(220.0));
-        egui::Window::new("Material Browser")
+        egui::Window::new("Material Browser").constrain_to(timeline::workspace_rect(&context))
             .id(egui::Id::new("material_library_window_scrollable_v4"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-170.0, 12.0))
             .default_width(material_panel_width)
             .max_width(material_panel_width)
-            .default_height((context.content_rect().height() - 24.0).max(120.0))
+            .default_height((timeline::workspace_rect(context).height() - 24.0).max(120.0))
             .min_height(160.0)
-            .max_height((context.content_rect().height() - 24.0).max(120.0))
+            .max_height((timeline::workspace_rect(context).height() - 24.0).max(120.0))
             .resizable(true)
             .vscroll(true)
             .show(context, |ui| {
@@ -5864,11 +5895,11 @@ impl State {
             .id(egui::Id::new("geo_tree_window_scrollable_v3"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-170.0, 12.0))
             .default_width(420.0)
-            .default_height((context.content_rect().height() - 24.0).max(120.0))
+            .default_height((timeline::workspace_rect(context).height() - 24.0).max(120.0))
             .min_height(160.0)
-            .max_height((context.content_rect().height() - 24.0).max(120.0))
+            .max_height((timeline::workspace_rect(context).height() - 24.0).max(120.0))
             .collapsible(true)
-            .constrain(true)
+            .constrain_to(timeline::workspace_rect(&context))
             .vscroll(true)
             .resizable(true)
             .show(context, |ui| {
@@ -6647,6 +6678,7 @@ impl State {
     #[cfg(not(target_arch = "wasm32"))]
     fn load_pending_asset(&mut self) {
         if let Some(path) = self.editor.pending_asset.take() {
+            self.timeline = Default::default();
             let loading_fx_project = self.pending_project.as_ref()
                 .and_then(|project| project.imported_model.as_ref())
                 .is_some_and(|model| std::path::Path::new(&model.path) == path);
@@ -6731,6 +6763,7 @@ impl State {
         self.deconstruction = demos::Deconstruction::default();
         self.demo_buffers.clear();
         self.part_selection = Default::default();
+        self.timeline.attach(path.clone(), loaded_model.imported_scene.as_ref().and_then(|scene|scene.animation.clone()), pending.time_code);
         self.obj_model = loaded_model;
         self.mesh_material_assignments =
             vec![material_library::MaterialId(0); self.obj_model.meshes.len()];
@@ -7323,6 +7356,7 @@ impl State {
     }
 
     fn render(&mut self) -> anyhow::Result<()> {
+        let mut profile = frame_profile::Frame::new();
         self.fps_frames = self.fps_frames.saturating_add(1);
         let sample_elapsed = self.fps_sample_started.elapsed();
         if sample_elapsed.as_secs_f64() >= 0.25 {
@@ -7333,41 +7367,22 @@ impl State {
         let raw_input = self.egui.state.take_egui_input(&self.window);
         let context = self.egui.context.clone();
         let full_output = context.run_ui(raw_input, |ctx| self.build_editor_ui(ctx));
+        profile.mark("ui");
         self.load_pending_asset();
         self.apply_pending_fx_project(&context);
         self.load_pending_hdri();
         self.load_pending_texture();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.update_timeline();
         self.update_demo_buffers();
-        self.update_camera_clip_planes();
+        profile.mark("animation");
+        self.update();
         let pointer_down = context.input(|input| input.pointer.primary_down());
         #[cfg(not(target_arch = "wasm32"))]
         if !pointer_down { self.preference_store.save(&self.preferences, false); }
-        self.record_undo_state(pointer_down);
+        if !self.timeline.is_running() { self.record_undo_state(pointer_down); }
 
-        // The gizmo and material widgets mutate render state while this UI frame
-        // is being built. Refresh every dependent uniform here so the viewport
-        // rendered below uses that exact state and keeps it after the pointer is
-        // released.
-        self.camera_uniform.update_view_proj(&self.camera);
-        self.queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::cast_slice(&[self.camera_uniform]),
-        );
-        self.update_grid_camera();
-        self.material_graph
-            .apply_to_uniform(&mut self.pbr_material.uniform);
-        self.sync_environment_light();
-        self.pbr_material.uniform.properties[3] =
-            self.editor.hdri_intensity * self.editor.hdri_exposure.exp2();
-        self.pbr_material.uniform.options[0] = self.editor.hdri_rotation.to_radians();
-        self.pbr_material.uniform.options[2] = if self.editor.texture_enabled {
-            1.0
-        } else {
-            0.0
-        };
-        self.pbr_material.uniform.inspection[0] = if self.show_uv_overlay { 1.0 } else { 0.0 };
-        self.pbr_material.upload(&self.queue);
+        // update() runs after UI and animation changes, once per rendered frame.
         for (tile, buffer) in &self.geo_material_uniform_buffers {
             let mut uniform = self.pbr_material.uniform;
             uniform.inspection[2] = self
@@ -7391,14 +7406,6 @@ impl State {
             self.queue
                 .write_buffer(buffer, 0, bytemuck::bytes_of(&uniform));
         }
-        self.shadow_renderer
-            .prepare(&self.queue, &self.lighting, &self.camera);
-        self.lighting_gpu.upload(
-            &self.queue,
-            &self.lighting,
-            &self.camera,
-            &self.shadow_renderer,
-        );
         let point_uniform = PointUniform {
             color: self.point_color,
             settings: [
@@ -7461,6 +7468,7 @@ impl State {
             }
         }
 
+        profile.mark("prepare");
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
             wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => surface_texture,
@@ -7478,6 +7486,7 @@ impl State {
             }
         };
 
+        profile.mark("acquire");
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -7685,9 +7694,12 @@ impl State {
         for id in &full_output.textures_delta.free {
             self.egui.renderer.free_texture(id);
         }
+        profile.mark("encode");
         self.queue
             .submit(extra.into_iter().chain(std::iter::once(encoder.finish())));
         output.present();
+        profile.mark("submit_present");
+        profile.finish(self.timeline.is_running());
         // Request after presenting, not while handling the current redraw.
         // This guarantees UI-driven material changes get a subsequent update
         // and GPU upload instead of being coalesced into the current frame.
@@ -7977,7 +7989,6 @@ impl ApplicationHandler<State> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::RedrawRequested => {
-                state.update();
                 match state.render() {
                     Ok(_) => {}
                     Err(e) => {

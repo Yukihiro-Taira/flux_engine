@@ -72,6 +72,7 @@ struct VertexOutput {
     @location(2) normal: vec3<f32>,
     @location(3) tangent: vec3<f32>,
     @location(4) bitangent: vec3<f32>,
+    @location(5) @interpolate(flat) orientation: f32,
 };
 
 @vertex
@@ -81,14 +82,14 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     let model_x = model[0].xyz;
     let model_y = model[1].xyz;
     let model_z = model[2].xyz;
-    // The inverse-transpose of an orthogonal rotation/scale matrix. Dividing
-    // each model column by its squared length keeps normals correct when the
-    // model's X/Y/Z scale controls are not uniform.
-    let normal = normalize(
-        model_x * vertex.normal.x / max(dot(model_x, model_x), 0.00000001)
-        + model_y * vertex.normal.y / max(dot(model_y, model_y), 0.00000001)
-        + model_z * vertex.normal.z / max(dot(model_z, model_z), 0.00000001)
-    );
+    // Cofactors give the inverse-transpose direction even when inherited
+    // nonuniform scales and animated rotations produce shear.
+    let determinant = dot(cross(model_x, model_y), model_z);
+    let normal = normalize((
+        cross(model_y, model_z) * vertex.normal.x
+        + cross(model_z, model_x) * vertex.normal.y
+        + cross(model_x, model_y) * vertex.normal.z
+    ) * select(-1.0, 1.0, determinant >= 0.0));
     let transformed_tangent = mat3x3<f32>(model_x, model_y, model_z) * vertex.tangent.xyz;
     let tangent = normalize(transformed_tangent - normal * dot(normal, transformed_tangent));
     let orientation = select(-1.0, 1.0, dot(cross(model_x, model_y), model_z) >= 0.0);
@@ -96,6 +97,7 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     output.clip_position = camera.view_proj * world;
     output.uv = vertex.tex_coords;
     output.world_position = world.xyz;
+    output.orientation = orientation;
     output.normal = normal;
     output.tangent = tangent;
     output.bitangent = normalize(cross(normal, tangent)) * vertex.tangent.w * orientation;
@@ -602,10 +604,10 @@ fn rotate_hue(color: vec3<f32>, degrees: f32) -> vec3<f32> {
 
 @fragment
 fn fs_main(input: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    return shade_surface(input, front, false);
+    return shade_surface(input, front != (input.orientation < 0.0), false);
 }
 
 @fragment
 fn fs_transparent(input: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    return shade_surface(input, front, true);
+    return shade_surface(input, front != (input.orientation < 0.0), true);
 }

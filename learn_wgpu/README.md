@@ -79,12 +79,12 @@ Supported data includes:
 - Hierarchical transforms, units, up-axis, visibility, mesh orientation, authored normals, indexed/interpolated UVs, polygon triangulation, holes, and material subsets.
 - Native instances, nested point instancers, and cube/sphere/cylinder/cone/capsule/plane primitives.
 - UsdPreviewSurface base color, opacity, metallic, roughness, normal, and emission, including texture channels, color spaces, scale/bias, and a UV set/transform per material.
-- A snapshot at the stage start time or a selected **USD time code**, including baked skeletal deformation. The chosen time is saved with `.fx` projects.
+- Playback and scrubbing from the fixed bottom timeline, including sampled transforms, points, visibility, and baked skeletal deformation. The chosen time is saved with `.fx` projects.
 - Imported cameras under **USD cameras & lights → View…**; supported scene lights can be added to the existing Lighting tools from the same section. HDR/EXR dome textures use the environment importer.
 
 USDZ texture bytes are resolved through OpenUSD and copied into content-addressed `usd-assets/` storage in the personal data directory. The importer does not extract archive paths or modify source USD layers. These textures work with scene saves and **Save to User Library**. Back up the personal data directory along with projects.
 
-This is an evaluated import into the editor, not a live USD stage editor or a USD exporter. Subdivision surfaces currently use their control mesh; curves, volumes, renderer-specific shaders, multiple UV sets on one material, lens shift, and some lighting/shading features cannot be reproduced exactly. **Import notes** reports unsupported or approximated features and missing assets. Animation is sampled during import, not played on a timeline. USD scenes are recomposed on every import so changes to referenced layers are not hidden by a root-file-only cache.
+This is an evaluated import into the editor, not a live USD stage editor or a USD exporter. Subdivision surfaces currently use their control mesh; curves, volumes, renderer-specific shaders, multiple UV sets on one material, lens shift, and some lighting/shading features cannot be reproduced exactly. **Import notes** reports unsupported or approximated features and missing assets. Animation frames are evaluated in the background and cached for playback. USD scenes are recomposed on every import so changes to referenced layers are not hidden by a root-file-only cache.
 
 ```sh
 # Real format, composition, material, animation, and package tests
@@ -101,6 +101,20 @@ LEARN_WGPU_USD_BENCHMARK_ASSET="/path/to/model.usdz" cargo test --offline benchm
 ```
 
 The benchmark does not include GPU upload or the first rendered frame. Import time depends on geometry, textures, storage, and hardware. Geometry conversion reuses transformed source values, and texture channel conversion uses native lookup tables without reducing mesh detail or changing the texture resolution limit.
+
+## Playback performance
+
+Normal `cargo run` enables optimization while keeping debug information. Use `cargo run --release` for the fastest build; the first optimized build takes longer.
+
+Texture-group controls edit one selected group at a time, so large imports do not build hundreds of offscreen editors each frame. Camera, lighting, and material uploads run once after UI and animation changes. Playback follows elapsed time and skips source samples when needed instead of slowing the animation clock.
+
+60 FPS requires each displayed frame to stay within 16.7 ms. Very large scenes, deformation, transparency, high-resolution displays, and shadows can exceed that budget; a universal 60 FPS guarantee is not possible. For local profiling, run `LEARN_WGPU_FRAME_PROFILE=/tmp/viewer-frames.csv cargo run --release`. The optional CSV records frame intervals and CPU stages (UI, animation, preparation, surface acquisition, encoding, submission/presentation); it does not measure GPU execution directly or include asset paths. Profiling is disabled by default.
+
+## Animation timeline
+
+The fixed bottom timeline uses a Houdini-style playbar with compact transport buttons, a numbered frame ruler, playhead, and editable playback range. Editor windows, the orientation gizmo, settings button, and material graph stay above its reserved dock. Animated USD and FBX imports expose their source range and frame rate, with play/pause, first/last frame, stepping, scrubbing, looping, and playback speed controls. USD uses the composed stage, including skeletal and blend-shape baking; FBX evaluates the default take, skinning, blend shapes, and available baked geometry caches. OBJ assets remain static.
+
+Transform-only USD animation keeps local mesh buffers on the GPU and updates per-group matrices, including shapes that start at zero scale. Playback follows elapsed time at the source rate, skipping display frames when needed instead of slowing the animation. Deforming assets use background geometry evaluation; uncached frames display an evaluation indicator. A bounded 128 MiB / 240-frame memory cache accelerates revisiting frames. The viewport camera and edited materials remain under user control: animated camera/light parameters and animated material inputs are not currently applied during playback. Reimport to refresh externally changed source files. Material overrides are matched by mesh name; face overrides require stable topology.
 
 ## Selecting model parts
 

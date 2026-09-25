@@ -210,6 +210,8 @@ def RectLight "Key" {
 
 #[derive(Clone, Default, serde::Serialize, Deserialize)]
 pub struct ImportedScene {
+    #[serde(default)]
+    pub animation: Option<AnimationClip>,
     pub lights: Vec<ImportedLight>,
     pub cameras: Vec<ImportedCamera>,
 }
@@ -243,4 +245,53 @@ pub struct ImportedLight {
     pub diffuse: f32,
     pub specular: f32,
     pub environment_path: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
+pub struct AnimationClip {
+    pub start: f64,
+    pub end: f64,
+    pub rate: f64,
+    pub animated: bool,
+    pub name: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct AnimationSession {
+    child: std::process::Child,
+    output: std::io::BufReader<std::process::ChildStdout>,
+}
+#[cfg(not(target_arch = "wasm32"))]
+impl AnimationSession {
+    pub fn new(path: &Path) -> Result<Self> {
+        let cache = crate::user_data::data_dir()?.join("usd-assets");
+        let mut child = Command::new(runtime_python()?).arg("-I").arg("-c")
+            .arg(include_str!("../scripts/usd_import.py")).arg(path).arg(cache).arg("--serve")
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn()?;
+        let output = std::io::BufReader::new(child.stdout.take().context("Missing USD output")?);
+        Ok(Self {child, output})
+    }
+    pub fn sample(&mut self, time: f64) -> Result<AnimationSample> {
+        use std::io::BufRead;
+        writeln!(self.child.stdin.as_mut().context("Missing USD input")?, "{}", serde_json::json!({"time":time,"transforms":true}))?;
+        let mut response = String::new();
+        self.output.read_line(&mut response)?;
+        let value: serde_json::Value = serde_json::from_str(&response).context("USD animation worker stopped")?;
+        if let Some(error) = value.get("error") { bail!("USD animation: {error}"); }
+        let transforms=value.get("transforms").map(|t|serde_json::from_value(t.clone())).transpose()?;
+        if value.get("meshes").is_some() {
+            Ok(AnimationSample::Geometry(serde_json::from_value(value)?,transforms))
+        } else { Ok(AnimationSample::Transforms(transforms.context("Missing animated transforms")?)) }
+    }
+
+}
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for AnimationSession {
+    fn drop(&mut self) { let _ = self.child.kill(); let _ = self.child.wait(); }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) enum AnimationSample {
+    Transforms(std::collections::HashMap<String, [[f32;4];4]>),
+    Geometry(UsdScene, Option<std::collections::HashMap<String, [[f32;4];4]>>),
 }

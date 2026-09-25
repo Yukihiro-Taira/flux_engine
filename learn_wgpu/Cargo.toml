@@ -40,6 +40,13 @@ crate-type = ["cdylib", "rlib"]
 name = "learn_wgpu"
 path = "src/main.rs"
 
+# Keep normal `cargo run` interactive while retaining debug information.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 strip = true
 
