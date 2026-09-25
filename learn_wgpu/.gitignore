@@ -79,3 +79,7 @@ __pycache__/
 Roadmap_yukihiro.md
 ROADMAP_YUKIHIRO.md
 roadmap.md
+
+# Interrupted atomic project writes (recovery data normally lives in user storage)
+.fx-write-*.tmp
+/recovery/

@@ -9,6 +9,8 @@ use std::{
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {
+    pub autosave_enabled: bool,
+    pub autosave_seconds: u64,
     pub background: [f32; 4],
     pub gizmo_at_bottom: bool,
     pub triangles: bool,
@@ -27,6 +29,8 @@ impl Default for Preferences {
     fn default() -> Self {
         let editor = crate::editor_ui::EditorUi::default();
         Self {
+            autosave_enabled: true,
+            autosave_seconds: 30,
             background: editor.background,
             gizmo_at_bottom: false,
             triangles: false,
@@ -45,6 +49,7 @@ impl Default for Preferences {
 
 impl Preferences {
     fn sanitize(&mut self) {
+        self.autosave_seconds = self.autosave_seconds.clamp(10, 300);
         self.point_size = self.point_size.clamp(2.0, 24.0);
         self.grid_size = self.grid_size.clamp(1.0, 10_000.0);
         self.grid_spacing = self.grid_spacing.clamp(0.1, 10.0);

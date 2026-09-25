@@ -32,6 +32,10 @@ mod user_data;
 mod preferences;
 mod frame_profile;
 mod workspace_layout;
+#[cfg(not(target_arch = "wasm32"))]
+mod recovery;
+#[cfg(target_os = "macos")]
+mod macos_quit;
 mod egui_renderer;
 mod environment;
 mod grid;
@@ -620,6 +624,9 @@ pub struct State {
     #[cfg(not(target_arch = "wasm32"))]
     pending_model_load: Option<PendingModelLoad>,
     project_path: String,
+    loaded_model_path: Option<std::path::PathBuf>,
+    #[cfg(not(target_arch = "wasm32"))]
+    recovery: recovery::Recovery,
     fx_load_started: Option<Instant>,
     material_texture_cache: HashMap<(std::path::PathBuf, bool, u64, u128), Arc<texture::Texture>>,
     generated_mesh_cache:
@@ -1469,6 +1476,9 @@ impl State {
             #[cfg(not(target_arch = "wasm32"))]
             pending_model_load: None,
             project_path: String::new(),
+            loaded_model_path: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            recovery: recovery::Recovery::new(),
             fx_load_started: None,
             material_texture_cache: HashMap::new(),
             generated_mesh_cache: HashMap::new(),
@@ -1557,7 +1567,14 @@ impl State {
             undo_last_snapshot: None,
             undo_transaction_active: false,
         };
+        #[cfg(target_os = "macos")]
+        macos_quit::register_window(&state.window);
         state.apply_user_preferences();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut project = state.capture_fx_project();
+            if let Ok(bytes) = recovery::fingerprint(&mut project) { state.recovery.baseline(bytes); }
+        }
         Ok(state)
     }
 
@@ -2617,99 +2634,105 @@ impl State {
                 });
         }
 
-        let clicked_view = navigation_gizmo::show(
-            &context,
-            self.camera.eye,
-            self.camera.target,
-            self.camera.up,
-        );
-
-        if let Some(view) = clicked_view {
-            self.snap_camera_to_view(view);
-        }
-
-        self.fps_counter_ui(&context);
-        self.camera_information_ui(&context);
-        self.geometry_information_ui(&context);
-        lighting::gizmo::show(
-            &context,
-            &mut self.lighting,
-            &self.camera,
-            self.houdini_navigation.view_mode_active(),
-        );
-        let light_gizmo_active = self.lighting.mode == lighting::ViewportLightingMode::SceneLights
-            && self.lighting.selected_light.is_some_and(|selected_id| {
-                self.lighting
-                    .lights
-                    .iter()
-                    .any(|light| light.id == selected_id && light.viewport_enabled)
-            });
-        if light_gizmo_active {
-            self.ground_plane.selected = false;
-        } else if self.ground_plane.generated && self.ground_plane.selected {
-            let pivot = cgmath::Vector3::new(
-                self.ground_plane.position_x,
-                self.ground_plane.position_y,
-                self.ground_plane.height,
+        #[cfg(not(target_arch = "wasm32"))]
+        let show_viewport_gizmos = !self.recovery.modal_open();
+        #[cfg(target_arch = "wasm32")]
+        let show_viewport_gizmos = true;
+        if show_viewport_gizmos {
+            let clicked_view = navigation_gizmo::show(
+                &context,
+                self.camera.eye,
+                self.camera.target,
+                self.camera.up,
             );
-            if let Some(change) = object_gizmo::show(
-                &context,
-                &self.camera,
-                pivot,
-                self.houdini_navigation.view_mode_active(),
-                "generated_shape",
-            ) {
-                if change.translation.z.abs() > f32::EPSILON {
-                    self.ground_plane.snap_bottom_to_grid = false;
-                }
-                self.ground_plane.position_x += change.translation.x;
-                self.ground_plane.position_y += change.translation.y;
-                self.ground_plane.height += change.translation.z;
-                for axis in 0..3 {
-                    self.ground_plane.rotation_degrees[axis] = (self.ground_plane.rotation_degrees
-                        [axis]
-                        + change.rotation_degrees[axis]
-                        + 180.0)
-                        .rem_euclid(360.0)
-                        - 180.0;
-                }
-                self.editor.status =
-                    format!("Transformed generated {}", self.ground_plane.kind.name());
+
+            if let Some(view) = clicked_view {
+                self.snap_camera_to_view(view);
             }
-        } else if let Some(pivot) = self.selected_gizmo_pivot().filter(|_| !self.part_selection.active) {
-            if let Some(change) = object_gizmo::show(
+
+            self.fps_counter_ui(&context);
+            self.camera_information_ui(&context);
+            self.geometry_information_ui(&context);
+            lighting::gizmo::show(
                 &context,
+                &mut self.lighting,
                 &self.camera,
-                pivot,
                 self.houdini_navigation.view_mode_active(),
-                "selected_object",
-            ) {
-                if let Some(instance) = self.instances.get_mut(self.editor.selected_instance) {
-                    instance.position += change.translation;
-                    instance.rotation_degrees.x =
-                        (instance.rotation_degrees.x + change.rotation_degrees.x + 180.0)
+            );
+            let light_gizmo_active = self.lighting.mode == lighting::ViewportLightingMode::SceneLights
+                && self.lighting.selected_light.is_some_and(|selected_id| {
+                    self.lighting
+                        .lights
+                        .iter()
+                        .any(|light| light.id == selected_id && light.viewport_enabled)
+                });
+            if light_gizmo_active {
+                self.ground_plane.selected = false;
+            } else if self.ground_plane.generated && self.ground_plane.selected {
+                let pivot = cgmath::Vector3::new(
+                    self.ground_plane.position_x,
+                    self.ground_plane.position_y,
+                    self.ground_plane.height,
+                );
+                if let Some(change) = object_gizmo::show(
+                    &context,
+                    &self.camera,
+                    pivot,
+                    self.houdini_navigation.view_mode_active(),
+                    "generated_shape",
+                ) {
+                    if change.translation.z.abs() > f32::EPSILON {
+                        self.ground_plane.snap_bottom_to_grid = false;
+                    }
+                    self.ground_plane.position_x += change.translation.x;
+                    self.ground_plane.position_y += change.translation.y;
+                    self.ground_plane.height += change.translation.z;
+                    for axis in 0..3 {
+                        self.ground_plane.rotation_degrees[axis] = (self.ground_plane.rotation_degrees
+                            [axis]
+                            + change.rotation_degrees[axis]
+                            + 180.0)
                             .rem_euclid(360.0)
                             - 180.0;
-                    instance.rotation_degrees.y =
-                        (instance.rotation_degrees.y + change.rotation_degrees.y + 180.0)
-                            .rem_euclid(360.0)
-                            - 180.0;
-                    instance.rotation_degrees.z =
-                        (instance.rotation_degrees.z + change.rotation_degrees.z + 180.0)
-                            .rem_euclid(360.0)
-                            - 180.0;
-                    self.instance_buffer_dirty = true;
-                    self.editor.status = if change.rotation_degrees.magnitude2() > f32::EPSILON {
-                        format!(
-                            "Rotated instance {} with viewport gizmo",
-                            self.editor.selected_instance + 1
-                        )
-                    } else {
-                        format!(
-                            "Moved instance {} with viewport gizmo",
-                            self.editor.selected_instance + 1
-                        )
-                    };
+                    }
+                    self.editor.status =
+                        format!("Transformed generated {}", self.ground_plane.kind.name());
+                }
+            } else if let Some(pivot) = self.selected_gizmo_pivot().filter(|_| !self.part_selection.active) {
+                if let Some(change) = object_gizmo::show(
+                    &context,
+                    &self.camera,
+                    pivot,
+                    self.houdini_navigation.view_mode_active(),
+                    "selected_object",
+                ) {
+                    if let Some(instance) = self.instances.get_mut(self.editor.selected_instance) {
+                        instance.position += change.translation;
+                        instance.rotation_degrees.x =
+                            (instance.rotation_degrees.x + change.rotation_degrees.x + 180.0)
+                                .rem_euclid(360.0)
+                                - 180.0;
+                        instance.rotation_degrees.y =
+                            (instance.rotation_degrees.y + change.rotation_degrees.y + 180.0)
+                                .rem_euclid(360.0)
+                                - 180.0;
+                        instance.rotation_degrees.z =
+                            (instance.rotation_degrees.z + change.rotation_degrees.z + 180.0)
+                                .rem_euclid(360.0)
+                                - 180.0;
+                        self.instance_buffer_dirty = true;
+                        self.editor.status = if change.rotation_degrees.magnitude2() > f32::EPSILON {
+                            format!(
+                                "Rotated instance {} with viewport gizmo",
+                                self.editor.selected_instance + 1
+                            )
+                        } else {
+                            format!(
+                                "Moved instance {} with viewport gizmo",
+                                self.editor.selected_instance + 1
+                            )
+                        };
+                    }
                 }
             }
         }
@@ -2725,6 +2748,8 @@ impl State {
         self.geo_tree_window(&context);
         self.uv_map_window(&context);
         self.timeline_ui(&context);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.recovery_ui(&context);
     }
 
     fn side_panel_tabs(&mut self, context: &egui::Context) {
@@ -3294,7 +3319,7 @@ impl State {
     fn capture_fx_project(&self) -> FxProject {
         let imported_model = (!self.obj_model.meshes.is_empty() || self.obj_model.imported_scene.is_some()).then(|| FxImportedModel {
             usd_time_code: (!self.editor.usd_use_stage_start).then_some(self.editor.usd_time_code),
-            path: self.editor.model_path_input.clone(),
+            path: self.loaded_model_path.as_ref().map(|path| path.display().to_string()).unwrap_or_else(|| self.editor.model_path_input.clone()),
             instances: self
                 .instances
                 .iter()
@@ -3474,45 +3499,42 @@ impl State {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn save_fx_project(&mut self, mut path: std::path::PathBuf) {
-        if path.extension().and_then(|value| value.to_str()) != Some("fx") {
-            path.set_extension("fx");
-        }
-        let result = serde_json::to_string_pretty(&self.capture_fx_project())
-            .map_err(anyhow::Error::from)
-            .and_then(|json| std::fs::write(&path, json).map_err(anyhow::Error::from));
+    fn save_fx_project(&mut self, mut path: std::path::PathBuf) -> bool {
+        if path.extension().and_then(|value| value.to_str()) != Some("fx") { path.set_extension("fx"); }
+        let mut project = self.capture_fx_project();
+        let result = (|| -> anyhow::Result<Vec<u8>> {
+            let bytes = serde_json::to_vec_pretty(&project)?;
+            if let Some(root) = self.recovery.root.as_ref() { recovery::save_project(root, &path, &bytes)?; }
+            else if !path.exists() { recovery::atomic_write(&path, &bytes)?; }
+            else { anyhow::bail!("Backup storage is unavailable. Use Save As to keep the existing project safe."); }
+            recovery::fingerprint(&mut project)
+        })();
         match result {
-            Ok(()) => {
+            Ok(bytes) => {
                 self.project_path = path.display().to_string();
+                self.recovery.baseline(bytes);
+                self.finish_recovered_session();
                 self.editor.status = format!("Saved FX project: {}", path.display());
+                true
             }
-            Err(error) => self.editor.status = format!("Could not save FX project: {error:#}"),
+            Err(error) => { self.editor.status = format!("Could not save FX project: {error:#}"); false }
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn queue_fx_project(&mut self, path: std::path::PathBuf) {
-        self.fx_load_started = Some(Instant::now());
-        let result = std::fs::read_to_string(&path)
-            .map_err(anyhow::Error::from)
+        self.request_document_action(recovery::Action::Open(path));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_fx_project_now(&mut self, path: std::path::PathBuf) {
+        let result = std::fs::read_to_string(&path).map_err(anyhow::Error::from)
             .and_then(|json| serde_json::from_str::<FxProject>(&json).map_err(anyhow::Error::from));
         match result {
-            Ok(project)
-                if project.format == "FX Scene Project"
-                    && project.version <= FX_PROJECT_VERSION =>
-            {
-                if let Some(model) = &project.imported_model
-                    && !model.path.is_empty()
-                {
-                    self.editor.pending_asset = Some(std::path::PathBuf::from(&model.path));
-                }
-                self.pending_project = Some(project);
-                self.project_path = path.display().to_string();
-                self.editor.status = "FX project queued for loading".to_owned();
+            Ok(project) if project.format == "FX Scene Project" && project.version <= FX_PROJECT_VERSION => {
+                self.stage_fx_project(project, path.display().to_string());
             }
-            Ok(project) => {
-                self.editor.status = format!("Unsupported FX project version {}", project.version)
-            }
+            Ok(project) => self.editor.status = format!("Unsupported FX project version {}", project.version),
             Err(error) => self.editor.status = format!("Could not load FX project: {error:#}"),
         }
     }
@@ -3568,14 +3590,9 @@ impl State {
         }
         #[cfg(not(target_arch = "wasm32"))]
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Save .fx…").clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("FX Project", &["fx"])
-                    .set_file_name("scene.fx")
-                    .save_file()
-            {
-                self.save_fx_project(path);
-            }
+            if ui.button("Save").clicked() { self.save_document(false); }
+            if ui.button("Save As…").clicked() { self.save_document(true); }
+            ui.label(if self.recovery.dirty { "● Unsaved changes" } else { "Saved" });
             if ui.button("Load .fx…").clicked()
                 && let Some(path) = rfd::FileDialog::new()
                     .add_filter("FX Project", &["fx"])
@@ -3684,6 +3701,14 @@ impl State {
     }
 
     fn clear_imported_model(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.request_document_action(recovery::Action::Clear);
+        #[cfg(target_arch = "wasm32")]
+        self.clear_imported_model_now();
+    }
+
+    fn clear_imported_model_now(&mut self) {
+        self.loaded_model_path = None;
         self.timeline = Default::default();
         #[cfg(not(target_arch = "wasm32"))]
         { self.pending_model_load = None; }
@@ -6395,6 +6420,8 @@ impl State {
                 self.editor.grid_color,
             );
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.recovery_settings_ui(ui);
         self.capture_user_preferences();
         ui.separator();
         ui.horizontal(|ui| {
@@ -6612,10 +6639,15 @@ impl State {
     #[cfg(not(target_arch = "wasm32"))]
     fn load_pending_asset(&mut self) {
         if let Some(path) = self.editor.pending_asset.take() {
-            self.timeline = Default::default();
             let loading_fx_project = self.pending_project.as_ref()
                 .and_then(|project| project.imported_model.as_ref())
                 .is_some_and(|model| std::path::Path::new(&model.path) == path);
+            if !loading_fx_project && !std::mem::take(&mut self.recovery.approved_import) {
+                let time = (!self.editor.usd_use_stage_start).then_some(self.editor.usd_time_code);
+                self.request_document_action(recovery::Action::Import(path, time));
+                return;
+            }
+            self.timeline = Default::default();
             let time_code = if loading_fx_project {
                 self.pending_project.as_ref().and_then(|project| project.imported_model.as_ref()).and_then(|model| model.usd_time_code)
             } else {
@@ -6647,11 +6679,13 @@ impl State {
             Ok(_) => {
                 self.editor.status = "Imported model contains no surface meshes".to_owned();
                 self.pending_project = None;
+                self.recovery_load_failed();
                 return;
             }
             Err(error) => {
                 self.editor.status = format!("Could not import model: {error}");
                 self.pending_project = None;
+                self.recovery_load_failed();
                 return;
             }
         };
@@ -6661,6 +6695,8 @@ impl State {
                 Ok(material) => material,
                 Err(error) => {
                     self.editor.status = format!("Could not reset material: {error:#}");
+                    self.pending_project = None;
+                    self.recovery_load_failed();
                     return;
                 }
             };
@@ -6698,6 +6734,7 @@ impl State {
         self.demo_buffers.clear();
         self.part_selection = Default::default();
         self.timeline.attach(path.clone(), loaded_model.imported_scene.as_ref().and_then(|scene|scene.animation.clone()), pending.time_code);
+        self.loaded_model_path = Some(path.clone());
         self.obj_model = loaded_model;
         self.mesh_material_assignments =
             vec![material_library::MaterialId(0); self.obj_model.meshes.len()];
@@ -6985,7 +7022,7 @@ impl State {
                 self.instance_buffer_dirty = true;
             }
         } else if !self.obj_model.meshes.is_empty() {
-            self.clear_imported_model();
+            self.clear_imported_model_now();
         }
 
         self.generated_objects.clear();
@@ -7177,6 +7214,8 @@ impl State {
         self.undo_stack.clear();
         self.undo_last_snapshot = None;
         self.undo_transaction_active = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.recovery.settle_loaded = true; }
         self.editor.status = "FX project loaded".to_owned();
         if let Some(started) = self.fx_load_started.take() {
             let elapsed = started.elapsed();
@@ -7302,12 +7341,18 @@ impl State {
         }
         let raw_input = self.egui.state.take_egui_input(&self.window);
         let context = self.egui.context.clone();
+        #[cfg(target_os = "macos")]
+        if macos_quit::take_request() { self.request_document_action(recovery::Action::Close); }
         let full_output = context.run_ui(raw_input, |ctx| self.build_editor_ui(ctx));
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.recovery.exit_requested { return Ok(()); }
         profile.mark("ui");
         self.load_pending_asset();
         self.apply_pending_fx_project(&context);
         self.load_pending_hdri();
         self.load_pending_texture();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.update_recovery();
         #[cfg(not(target_arch = "wasm32"))]
         self.update_timeline();
         self.update_demo_buffers();
@@ -7875,6 +7920,12 @@ impl ApplicationHandler<State> for App {
             }
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        if state.recovery.modal_open() && !matches!(event, WindowEvent::CloseRequested | WindowEvent::Resized(_) | WindowEvent::RedrawRequested) {
+            let response = state.egui.state.on_window_event(&state.window, &event);
+            if response.repaint { state.window.request_redraw(); }
+            return;
+        }
         // Tab belongs exclusively to the viewport generation menu. Intercept it
         // before egui receives the event so it cannot advance widget focus.
         let tab_pressed = matches!(
@@ -7900,6 +7951,18 @@ impl ApplicationHandler<State> for App {
             return;
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        if state.undo_modifier_held && !state.material_graph.open {
+            if let WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(key), state: ElementState::Pressed, repeat: false, .. }, .. } = &event {
+                if *key == KeyCode::KeyS {
+                    let save_as = state.egui.context.input(|input| input.modifiers.shift);
+                    state.save_document(save_as);
+                    state.window.request_redraw();
+                    return;
+                }
+                if *key == KeyCode::KeyQ { state.request_document_action(recovery::Action::Close); }
+            }
+        }
         let undo_pressed = state.undo_modifier_held
             && matches!(
                 &event,
@@ -7927,11 +7990,22 @@ impl ApplicationHandler<State> for App {
         // For camera keyboard/mouse controls:
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    state.request_document_action(recovery::Action::Close);
+                    if state.recovery.exit_requested { event_loop.exit(); }
+                }
+                #[cfg(target_arch = "wasm32")]
+                event_loop.exit();
+            },
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::RedrawRequested => {
                 match state.render() {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if state.recovery.exit_requested { event_loop.exit(); }
+                    }
                     Err(e) => {
                         log::error!("{e}");
                         event_loop.exit();
@@ -8119,6 +8193,8 @@ pub fn run() -> anyhow::Result<()> {
     }
 
     let event_loop = EventLoop::with_user_event().build()?;
+    #[cfg(target_os = "macos")]
+    let _quit_hook = macos_quit::install()?;
     #[cfg(not(target_arch = "wasm32"))]
     {
         let mut app = App::new();

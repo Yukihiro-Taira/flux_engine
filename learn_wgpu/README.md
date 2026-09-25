@@ -102,6 +102,18 @@ LEARN_WGPU_USD_BENCHMARK_ASSET="/path/to/model.usdz" cargo test --offline benchm
 
 The benchmark does not include GPU upload or the first rendered frame. Import time depends on geometry, textures, storage, and hardware. Geometry conversion reuses transformed source values, and texture channel conversion uses native lookup tables without reducing mesh detail or changing the texture resolution limit.
 
+## Autosave, backups, and crash recovery
+
+Desktop builds create a recovery copy every **30 seconds** while a scene has unsaved changes. Configure the interval (10–300 seconds), disable automatic copies, or save a copy immediately under **Settings → Autosave & Recovery**. Recovery writes run in the background and never overwrite your `.fx` project. Playback time and inspector selection alone do not mark a scene dirty.
+
+Closing the app, loading another project, replacing an imported model, or clearing it prompts **Save and continue / Discard changes / Cancel** when necessary. **Save** updates the current project; **Save As…** chooses a new file. Use **Cmd/Ctrl+S** to save and **Cmd/Ctrl+Shift+S** for Save As when the material graph is closed (the graph retains its own save shortcut).
+
+Project saves use a temporary file and atomic replacement. Before replacing an existing project, the app keeps its previous contents as a backup. Five previous saves are retained per project; choose **Settings → Autosave & Recovery → Restore previous save…** to inspect an older version. Restoring a backup marks the scene unsaved and leaves the current project file unchanged until you save.
+
+After an interrupted session, the next launch offers recovery. Choose **Recover**, select an older copy, discard that session's recovery, or keep it for later. Five autosave versions are retained per session, and a damaged newest copy falls back to an older readable copy. Active sessions are locked so one running app instance cannot recover another's live work. Recovery data and backups live under `recovery/` in the personal app data directory, outside the repository.
+
+Recovery restores the latest completed snapshot; changes since that snapshot may be lost after a crash. Models, textures, and environments remain external references and must still be available. Autosave pauses while an import is incomplete so a partial load does not replace the recovery copy.
+
 ## Workspace and materials
 
 The right-hand tabs share one inspector position and size: Object, Geometry Inspection, Lighting, Scene Outliner, Materials, Demos, UV Map, and Settings. Part selection adds a Selected Part tab. Switch tabs to change tools; click the active tab to hide the inspector. Panels stay above the timeline and the open material graph. Explorer docks separately on the left when space permits; narrow windows show one panel at a time.
