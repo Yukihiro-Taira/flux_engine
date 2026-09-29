@@ -2,6 +2,7 @@
 name = "flux_engine"
 version = "0.1.2"
 edition = "2024"
+rust-version = "1.96"
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
@@ -32,6 +33,10 @@ features = ["png", "jpeg", "hdr", "exr"]
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rfd = "0.15"
 ufbx = "0.11.3"
+openusd = "0.7.0"
+openusd-schemas = { version = "0.7.0", features = ["geom", "shade", "skel"] }
+earcutr = "0.5"
+sha2 = "0.10"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

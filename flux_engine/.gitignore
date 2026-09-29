@@ -70,11 +70,6 @@ Desktop.ini
 *~
 *.log
 
-# Isolated OpenUSD runtime and Python test caches
-/.usd-runtime/
-__pycache__/
-*.pyc
-
 # Local roadmaps
 Roadmap_yukihiro.md
 ROADMAP_YUKIHIRO.md

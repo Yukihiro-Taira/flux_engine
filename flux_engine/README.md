@@ -63,13 +63,7 @@ cargo run --release -- /path/to/scene.fx
 
 ## USD import
 
-USD support uses the official [OpenUSD](https://openusd.org/release/index.html) runtime, including its composition engine and binary/package readers. Install its isolated Python backend once (Python 3.10–3.14):
-
-```sh
-python3 scripts/setup_usd.py
-```
-
-The installer creates `.usd-runtime/`, which is ignored by Git. OBJ/FBX import does not require this backend. For a packaged app, put `usd-runtime` beside the executable, install it in the personal data directory, or set `LEARN_WGPU_USD_PYTHON` to the Python executable of an environment containing the pinned packages in `scripts/usd-requirements.txt`. The app never downloads dependencies during import.
+USD import is implemented in Rust using [`openusd`](https://github.com/mxpv/openusd) and `openusd-schemas` for format decoding, composition, and schema evaluation. It is built into the application with Cargo; no separate runtime installation is needed. Building requires Rust 1.96 or newer.
 
 Use **Object → Model Import**, drag a file from Explorer, drop a file onto the Object panel, or pass its path at startup. `.usd` detects its underlying format; `.usda`, `.usdc`, and `.usdz` use the same workflow. Imports run in the background, preserve the current scene if decoding fails, and frame the imported model automatically.
 
@@ -79,22 +73,22 @@ Supported data includes:
 - Hierarchical transforms, units, up-axis, visibility, mesh orientation, authored normals, indexed/interpolated UVs, polygon triangulation, holes, and material subsets.
 - Native instances, nested point instancers, and cube/sphere/cylinder/cone/capsule/plane primitives.
 - UsdPreviewSurface base color, opacity, metallic, roughness, normal, and emission, including texture channels, color spaces, scale/bias, and a UV set/transform per material.
-- Playback and scrubbing from the fixed bottom timeline, including sampled transforms, points, visibility, and baked skeletal deformation. The chosen time is saved with `.fx` projects.
+- Playback and scrubbing from the fixed bottom timeline, including sampled transforms, points, visibility, and linear blend skeletal deformation. The chosen time is saved with `.fx` projects.
 - Imported cameras under **USD cameras & lights → View…**; supported scene lights can be added to the existing Lighting tools from the same section. HDR/EXR dome textures use the environment importer.
 
-USDZ texture bytes are resolved through OpenUSD and copied into content-addressed `usd-assets/` storage in the personal data directory. The importer does not extract archive paths or modify source USD layers. These textures work with scene saves and **Save to User Library**. Back up the personal data directory along with projects.
+USDZ texture bytes are resolved through the native asset resolver and copied into content-addressed `usd-assets/` storage in the personal data directory. The importer does not extract archive paths or modify source USD layers. These textures work with scene saves and **Save to User Library**. Back up the personal data directory along with projects.
 
-This is an evaluated import into the editor, not a live USD stage editor or a USD exporter. Subdivision surfaces currently use their control mesh; curves, volumes, renderer-specific shaders, multiple UV sets on one material, lens shift, and some lighting/shading features cannot be reproduced exactly. **Import notes** reports unsupported or approximated features and missing assets. Animation frames are evaluated in the background and cached for playback. USD scenes are recomposed on every import so changes to referenced layers are not hidden by a root-file-only cache.
+This is an evaluated import into the editor, not a live USD stage editor or a USD exporter. Subdivision surfaces currently use their control mesh; curves, volumes, renderer-specific shaders, multiple UV sets on one material, lens shift, blend-shape deformation, and some lighting/shading features cannot be reproduced exactly. Dual-quaternion skinning uses a linear blend approximation, and skinned normals are regenerated from deformed geometry. The native USD library is an independent implementation; compatibility with every feature of the reference runtime is not guaranteed. **Import notes** reports unsupported or approximated features and missing assets. Animation frames are evaluated in the background and cached for playback. USD scenes are recomposed on every import so changes to referenced layers are not hidden by a root-file-only cache.
 
 ```sh
-# Real format, composition, material, animation, and package tests
-.usd-runtime/bin/python -m unittest discover -s tests -p 'test_usd*.py' -v
+# Native format, composition, material, animation, and package tests
+cargo test usd_import --lib
 
-# Include the Rust → OpenUSD bridge integration test
-cargo test -- --include-ignored
+# Full Rust test suite
+cargo test
 ```
 
-To check the 20-second CPU import budget against a local model (OpenUSD conversion, JSON transfer, and Rust mesh preparation):
+To check the 20-second CPU import budget against a local model (native USD evaluation and mesh preparation):
 
 ```sh
 LEARN_WGPU_USD_BENCHMARK_ASSET="/path/to/model.usdz" cargo test --offline benchmark_usd_preparation -- --ignored --nocapture
@@ -234,7 +228,7 @@ cargo build --release
 
 - `src/lib.rs` — application lifecycle, viewport rendering, editor workflows, and scene persistence.
 - `src/resources.rs` — model import, geometry processing, and model caches.
-- `src/usd_import.rs` and `scripts/usd_import.py` — official OpenUSD bridge, composed scene conversion, and persistent packaged textures.
+- `src/usd_import.rs`, `src/usd_native.rs`, `src/usd_geometry.rs`, and `src/usd_material.rs` — native USD composition, scene conversion, animation, and persistent packaged textures.
 - `src/model.rs` — mesh data and rendering helpers.
 - `src/material.rs` — GPU materials and texture handling.
 - `src/material_library.rs` — scene materials and assignments.

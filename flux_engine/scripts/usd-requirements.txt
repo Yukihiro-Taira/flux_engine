@@ -1,2 +1,0 @@
-usd-core==26.8
-Pillow==12.3.0

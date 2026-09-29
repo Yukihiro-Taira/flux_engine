@@ -1020,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires an external USD asset and OpenUSD runtime"]
+    #[ignore = "requires an external USD asset"]
     fn external_usd_preserves_authored_uvs_and_material_assignments() {
         let Some(path) = std::env::var_os("LEARN_WGPU_USD_UV_TEST_ASSET") else {
             return;
